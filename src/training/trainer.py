@@ -100,11 +100,14 @@ class Trainer:
                 raise ValueError("checkpoint XML hash mismatch")
             if self._budget_reached():
                 raise ValueError("training budget must exceed the steps/episodes already in the checkpoint")
-        # All newly started training, including resume, uses broad randomization.
+        # New/resumed runs randomize starts; obstacle-task targets stay fixed.
         previous_reset_distribution = base_env.reset_distribution
+        previous_randomize_goal = base_env.randomize_goal
         reset_distribution_changed = previous_reset_distribution != "arena_wide" or not base_env.randomize_reset
-        base_env = replace(base_env, reset_distribution="arena_wide", randomize_reset=True)
-        if self.agent is not None and reset_distribution_changed:
+        goal_distribution_changed = base_env.difficulty != "easy" and previous_randomize_goal
+        base_env = replace(base_env, reset_distribution="arena_wide", randomize_reset=True,
+                           randomize_goal=previous_randomize_goal if base_env.difficulty == "easy" else False)
+        if self.agent is not None and (reset_distribution_changed or goal_distribution_changed):
             self.agent.obs_normalizer.reset()
             self.agent.state_normalizer.reset()
             self.episode_stats = EpisodeStats(cfg.stats_window_size)
@@ -149,7 +152,9 @@ class Trainer:
                     "actual_device": str(self.agent.device),
                     "previous_reset_distribution": previous_reset_distribution,
                     "reset_distribution_changed": reset_distribution_changed,
-                    "normalization_reset": self.agent is not None and resume is not None and reset_distribution_changed,
+                    "previous_randomize_goal": previous_randomize_goal,
+                    "goal_distribution_changed": goal_distribution_changed,
+                    "normalization_reset": resume is not None and (reset_distribution_changed or goal_distribution_changed),
                     "completed_episodes_at_start": self.completed_episodes,
                     "resume_starts_new_episode": resume is not None}
         write_json(self.run_dir / "manifest.json", manifest)

@@ -1,6 +1,3 @@
 -r requirements.txt
 # Baseline API target; install its CPU or CUDA build as described in README.
 torch==2.6.0
-tensorboard==2.20.0
-# TensorBoard 2.20's CLI still imports pkg_resources.
-setuptools==80.9.0

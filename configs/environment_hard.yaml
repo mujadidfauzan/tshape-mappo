@@ -1,0 +1,26 @@
+# Fixed three-room Hard course: two staggered 0.8 m openings.
+# Fixed right goal; random object in left room; random agents across all rooms.
+# 2,500 decisions x 50 ms = 125 seconds of simulated time.
+difficulty: hard
+model_path: assets/mujoco/arena_hard.xml
+frame_skip: 50
+max_steps: 2500
+goal_center: [3.25, 1.5]
+goal_half_size: [0.75, 0.65]
+success_linear_speed: 0.05
+success_angular_speed: 0.1
+success_hold_steps: 5
+randomize_reset: true
+randomize_goal: false
+reset_distribution: arena_wide
+arena_spawn_margin: 0.15
+minimum_goal_distance: 1.5
+spawn_clearance: 0.04
+reset_attempts: 100
+progress_weight: 2.0
+success_reward: 20.0
+time_penalty: 0.001
+failure_penalty: 20.0
+max_penetration: 0.005
+max_linear_speed: 5.0
+max_angular_speed: 10.0

@@ -1,4 +1,4 @@
-"""Run M2 smoke episodes, optional API checks, and reproducible trajectory logs."""
+"""Run Easy/Medium/Hard smoke episodes, API checks, and trajectory logs."""
 
 import argparse
 from dataclasses import replace

@@ -1,4 +1,4 @@
-"""Validated, serializable configuration for the fixed four-agent Easy task."""
+"""Validated, serializable configuration for four-agent transport tasks."""
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
@@ -13,6 +13,7 @@ DEFAULT_CONFIG_PATH = ROOT / "configs" / "environment.yaml"
 
 @dataclass(frozen=True)
 class EnvironmentConfig:
+    difficulty: str = "easy"
     model_path: str = "assets/mujoco/arena.xml"
     frame_skip: int = 50
     max_steps: int = 500
@@ -22,6 +23,9 @@ class EnvironmentConfig:
     success_angular_speed: float = 0.1
     success_hold_steps: int = 5
     randomize_reset: bool = True
+    # Resolved defaults: Easy randomizes goals; fixed-layout tasks do not.
+    # Stored explicitly so old random-goal checkpoints remain reproducible.
+    randomize_goal: bool | None = None
     reset_distribution: str = "arena_wide"
     arena_spawn_margin: float = 0.15
     minimum_goal_distance: float = 1.5
@@ -40,6 +44,14 @@ class EnvironmentConfig:
     max_angular_speed: float = 10.0
 
     def __post_init__(self):
+        if self.difficulty not in ("easy", "medium", "hard"):
+            raise ValueError("difficulty must be easy, medium or hard")
+        if self.difficulty != "easy" and self.reset_distribution != "arena_wide":
+            raise ValueError("obstacle tasks require the arena_wide reset distribution")
+        if self.randomize_goal is None:
+            object.__setattr__(self, "randomize_goal", self.difficulty == "easy")
+        if not isinstance(self.randomize_goal, bool):
+            raise ValueError("randomize_goal must be a boolean")
         for name in ("frame_skip", "max_steps", "success_hold_steps", "reset_attempts"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
@@ -107,4 +119,4 @@ def load_config(config=None, **overrides):
 
 def load_checkpoint_config(values):
     """Old checkpoints retain their original reset semantics during evaluation."""
-    return load_config({"reset_distribution": "legacy", **values})
+    return load_config({"reset_distribution": "legacy", "randomize_goal": True, **values})

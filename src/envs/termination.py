@@ -1,4 +1,4 @@
-"""Geometry and speed conditions for completing the Easy transport task."""
+"""Shared geometry and speed conditions for completing transport tasks."""
 
 import numpy as np
 

@@ -30,7 +30,7 @@ class TShapePhysics:
             if re.fullmatch(r"agent_\d+", m.body(i).name)
         )
         if self.agent_names != [f"agent_{i}" for i in range(4)]:
-            raise ValueError("Easy requires exactly agent_0 through agent_3")
+            raise ValueError("Transport tasks require exactly agent_0 through agent_3")
         self.agent_bodies = np.array([m.body(n).id for n in self.agent_names])
         self.agent_geom_ids = np.array([m.geom(f"{n}_geom").id for n in self.agent_names])
         self.agent_geoms = set(self.agent_geom_ids.tolist())
@@ -65,6 +65,18 @@ class TShapePhysics:
         self.moving_geoms = np.array(sorted(self._moving_geom_set))
         self.radii = m.geom_size[self.agent_geom_ids, 0].copy()
         self.walls = {m.geom(f"wall_{side}").id for side in ("left", "right", "bottom", "top")}
+        self.obstacle_ids = [i for i in range(m.ngeom) if m.geom(i).name.startswith("obstacle_")]
+        self.obstacle_boxes = []
+        for geom in self.obstacle_ids:
+            if (m.geom_type[geom] != mujoco.mjtGeom.mjGEOM_BOX or m.geom_bodyid[geom] != 0
+                    or not np.allclose(m.geom_quat[geom], [1, 0, 0, 0])):
+                raise ValueError("Internal obstacles must be axis-aligned world-body boxes")
+            if not (m.geom_contype[geom] and m.geom_conaffinity[geom]):
+                raise ValueError("Internal obstacles must have collision enabled")
+            center, half = m.geom_pos[geom, :2], m.geom_size[geom, :2]
+            self.obstacle_boxes.append((center - half, center + half))
+        # Keep existing metric names: wall collisions include internal walls.
+        self.walls.update(self.obstacle_ids)
         self.floor = m.geom("floor").id
         self.lower = np.array([m.geom("wall_left").pos[0] + m.geom("wall_left").size[0],
                                m.geom("wall_bottom").pos[1] + m.geom("wall_bottom").size[1]])
@@ -221,11 +233,17 @@ class TShapePhysics:
         corners = self.object_corners()
         if np.any(corners < self.lower + clearance) or np.any(corners > self.upper - clearance):
             return False
+        if not self.object_clear_of_obstacles(clearance):
+            return False
         positions, _ = self.get_agents_state()
         if (np.any(positions - self.radii[:, None] < self.lower + clearance)
                 or np.any(positions + self.radii[:, None] > self.upper - clearance)):
             return False
         for i in range(4):
+            for lower, upper in self.obstacle_boxes:
+                nearest = np.clip(positions[i], lower, upper)
+                if np.linalg.norm(positions[i] - nearest) < self.radii[i] + clearance:
+                    return False
             for j in range(i):
                 if np.linalg.norm(positions[i] - positions[j]) < self.radii[i] + self.radii[j] + clearance:
                     return False
@@ -236,6 +254,68 @@ class TShapePhysics:
                 if np.linalg.norm(outside) < self.radii[i] + clearance:
                     return False
         return not self.data.ncon
+
+    @staticmethod
+    def _box_clear_of_rectangle(corners, lower, upper, clearance):
+        """Separating-axis check for one oriented box and an XY rectangle.
+
+        Positive clearance is conservative at diagonal corners: accepted boxes
+        are separated by at least that distance along a separating axis.
+        """
+        edges = corners[[1, 2]] - corners[0]
+        axes = np.vstack((np.eye(2), edges / np.linalg.norm(edges, axis=1)[:, None]))
+        center, half = (lower + upper) / 2, (upper - lower) / 2
+        projections = corners @ axes.T
+        middle, radius = center @ axes.T, np.abs(axes) @ half
+        gaps = np.maximum(middle - radius - projections.max(axis=0),
+                          projections.min(axis=0) - middle - radius)
+        return bool(np.any(gaps > clearance - 1e-12))
+
+    def object_clear_of_obstacles(self, clearance=0.0):
+        corners = self.object_corners().reshape(-1, 4, 2)
+        return all(self._box_clear_of_rectangle(box, lower, upper, clearance)
+                   for box in corners for lower, upper in self.obstacle_boxes)
+
+    def goal_clear_of_obstacles(self, center, half, clearance=0.0):
+        return all(np.any(np.maximum(lower - (center + half), (center - half) - upper)
+                             > clearance - 1e-12)
+                   for lower, upper in self.obstacle_boxes)
+
+    def transport_room_bounds(self, difficulty):
+        """Validate a fixed course and return its ordered free room rectangles.
+
+        These layout coordinates are used for reset validation, never appended
+        to actor observations or critic state, or used to shape rewards.
+        """
+        if difficulty == "medium":
+            dividers = [("obstacle", 0.0, 0.0)]
+            arena_x = (-2.9, 2.9)
+        elif difficulty == "hard":
+            dividers = [("obstacle_0", -1.1, .85), ("obstacle_1", 1.1, -.85)]
+            arena_x = (-4.5, 4.5)
+        else:
+            raise ValueError("room bounds require medium or hard difficulty")
+        expected = {f"{prefix}_{side}" for prefix, _, _ in dividers for side in ("upper", "lower")}
+        if {self.model.geom(i).name for i in self.obstacle_ids} != expected:
+            raise ValueError(f"{difficulty} requires its named fixed divider geometries")
+        if not (np.allclose([self.lower[0], self.upper[0]], arena_x)
+                and np.allclose([self.lower[1], self.upper[1]], [-2.9, 2.9])):
+            raise ValueError(f"{difficulty} arena bounds do not match its fixed layout")
+        rooms, left = [], self.lower[0]
+        for prefix, x, gap_y in dividers:
+            upper, lower = self.model.geom(f"{prefix}_upper"), self.model.geom(f"{prefix}_lower")
+            if not (np.allclose(upper.pos[:2] - upper.size[:2], [x - .1, gap_y + .4])
+                    and np.allclose(upper.pos[:2] + upper.size[:2], [x + .1, self.upper[1]])
+                    and np.allclose(lower.pos[:2] - lower.size[:2], [x - .1, self.lower[1]])
+                    and np.allclose(lower.pos[:2] + lower.size[:2], [x + .1, gap_y - .4])):
+                raise ValueError(f"{difficulty} requires its fixed dividers and 0.8 m openings")
+            rooms.append((np.array([left, self.lower[1]]), np.array([x - .1, self.upper[1]])))
+            left = x + .1
+        rooms.append((np.array([left, self.lower[1]]), self.upper.copy()))
+        return tuple(rooms)
+
+    def medium_room_bounds(self):
+        return self.transport_room_bounds("medium")
 
     def step(self, actions, **safety_limits):
         actions = np.clip(finite_array(actions, (4, 2), "actions"), -1.0, 1.0)

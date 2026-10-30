@@ -8,7 +8,7 @@ Inspired by cooperative geometric puzzle-solving experiments involving ants and 
 
 The primary objective is to investigate **emergent cooperative behavior**, where multiple agents learn to coordinate through physical interactions without explicitly programmed individual roles.
 
-The current implementation is an **Easy arena baseline with four agents and global actor information**. Obstacle courses, limited-range observations, variable agent counts, and generalization benchmarks are research extensions. Successful transport alone does not establish emergent coordination.
+The current implementation supports **Easy, Medium and Hard arenas with four agents and global actor information**. Medium adds one divider; Hard adds two dividers with staggered openings. The obstacle layouts and their target positions are fixed. All three policies use the same observation features and reward. Limited-range observations, variable agent counts, and held-out-layout benchmarks are research extensions. Successful transport alone does not establish emergent coordination.
 
 ---
 
@@ -130,7 +130,13 @@ The object has a total mass of **2 kg** and an overall footprint of **0.6 x 1.2 
 
 Joint damping and friction loss are used to model movement resistance and reduce excessive sliding.
 
-The arena interior measures **5.8 x 5.8 m**, with boundary walls and no internal obstacles. Bodies remain at fixed height with zero gravity; the floor is visual only. Support resistance is approximated by joint damping and dry friction rather than physical floor contact.
+Easy and Medium measure **5.8 x 5.8 m** internally. Easy has boundary walls only. Medium adds a fixed vertical divider at `x=0`, 0.2 m thick, with a **0.8 m opening** spanning `y=-0.4` to `0.4`. The object's 1.2 m span blocks some orientations; rotating it by 90 degrees gives a 0.6 m span across the opening.
+
+Hard measures **9.0 x 5.8 m**, with dividers at `x=-1.1` and `x=1.1`. Their 0.8 m openings are centered at `y=0.85` and `y=-0.85`, respectively. The middle room is 2.0 m wide so the object can translate, rotate, and leave room for agents to change sides. A constant-Y straight crossing cannot pass both staggered openings. These courses are inspired by the reference, not measured replicas of the original maze.
+
+Medium's target center stays at **`(1.8, 1.5)` m** and Hard's at **`(3.25, 1.5)` m** on every episode. Objects start randomly in the leftmost room, so successful transport must cross all dividers. Agents start independently throughout the free arena, not in an assigned formation.
+
+Bodies remain at fixed height with zero gravity; the floor is visual only. Support resistance is approximated by joint damping and dry friction rather than physical floor contact.
 
 ### Physics Configuration
 
@@ -141,14 +147,16 @@ The arena interior measures **5.8 x 5.8 m**, with boundary walls and no internal
 | Physics substeps per action   | 50                 |
 | Control interval              | 0.05 s             |
 | Control frequency             | 20 Hz              |
-| Maximum episode duration      | 25 s               |
-| Maximum environment steps     | 500                |
+| Maximum episode duration      | Easy: 25 s; Medium: 75 s; Hard: 125 s |
+| Maximum environment steps     | Easy: 500; Medium: 1,500; Hard: 2,500 |
 | Contact response              | `solref="0.002 1"` |
 | Contact penetration threshold | 5 mm               |
 
 The simulation uses a smaller physics timestep to improve contact resolution while maintaining a consistent control frequency.
 
-The object uses XY damping of 4 N·s/m and yaw damping of 0.8 N·m·s/rad, with dry friction of 1.5 N per translation axis and 0.16 N·m on yaw. Agent damping is 1 N·s/m per axis. Geometry, mass, damping, actuator limits, and contact settings are defined in [arena.xml](assets/mujoco/arena.xml). Task settings are in [environment.yaml](configs/environment.yaml).
+The object uses XY damping of 4 N·s/m and yaw damping of 0.8 N·m·s/rad, with dry friction of 1.5 N per translation axis and 0.16 N·m on yaw. Agent damping is 1 N·s/m per axis. Easy uses [arena.xml](assets/mujoco/arena.xml) and [environment.yaml](configs/environment.yaml). Medium uses [arena_medium.xml](assets/mujoco/arena_medium.xml) and [environment_medium.yaml](configs/environment_medium.yaml), with the same object/agent geometry, mass, resistance, actuator limits, and contact settings.
+
+Hard uses [arena_hard.xml](assets/mujoco/arena_hard.xml) and [environment_hard.yaml](configs/environment_hard.yaml), with the same object/agent physics and unchanged reward weights. The 2,500-step horizon is an initial budget for the longer course, not a demonstrated learned completion time.
 
 ## 4. Multi-Agent Environment
 
@@ -190,6 +198,8 @@ The centralized critic receives a separate **33-feature global state** containin
 
 Actor execution does not call the critic. However, actor information is currently global and has no sensor-range masking. Limited local perception and communication experiments are not implemented yet.
 
+All difficulty levels use exactly these 34 actor and 33 critic features. Medium and Hard have no added obstacle features or internal-wall range sensors. The four wall-clearance features still refer only to the outer arena boundaries. Their fixed dividers must be learned through interaction and the existing world-position information.
+
 ### Reward Function
 
 The environment uses a shared cooperative reward.
@@ -226,23 +236,25 @@ reward = 2 * progress - 0.001 + 20 * success - 20 * physics_failure
 | Success bonus | 20.0 |
 | Physical failure penalty | 20.0 |
 
-All four agents receive the same team reward. Training stores it once per team transition; it is not multiplied by the agent count. Episode return is the sum of these rewards over an episode. A stationary 500-step episode has a return near -0.5; moving 1 cm closer in one ordinary step gives 0.019.
+All four agents receive the same team reward. Training stores it once per team transition; it is not multiplied by the agent count. Episode return is the sum of these rewards over an episode. A stationary episode has a return near -0.5 for Easy, -1.5 for Medium, or -2.5 for Hard at their full horizons; moving 1 cm closer in one ordinary step gives 0.019.
 
-There is currently no reward for an agent merely approaching/touching the object, no energy penalty, and no ordinary collision penalty. Valid pushing contact is necessary. Wall contacts and control effort are logged as diagnostics; a contact triggers the failure penalty only if it leads to a physical safety violation. See [rewards.py](src/envs/rewards.py) for the implementation.
+There is currently no reward for an agent merely approaching/touching the object, no energy penalty, and no ordinary collision penalty. Valid pushing contact is necessary. Wall contacts and control effort are logged as diagnostics; a contact triggers the failure penalty only if it leads to a physical safety violation. The existing `wall_collision_events` and `wall_contact_physics_steps` metrics include all internal dividers. See [rewards.py](src/envs/rewards.py) for the implementation.
+
+Medium and Hard use the same Euclidean progress and reward weights as Easy. There are no rotation bonuses, waypoints, path-planner rewards, or extra maneuver incentives. A temporarily increasing goal distance can reduce reward even when the maneuver is useful; solving these baselines is an empirical training question.
 
 ### Episode Termination
 
 An episode ends when:
 
 1. **Success (`terminated=True`):** all corners of all three object geometries fit inside the goal rectangle, linear speed is at most 0.05 m/s, and absolute yaw rate is at most 0.1 rad/s for five consecutive decisions (0.25 s by default).
-2. **Time limit (`truncated=True`):** 500 decisions are reached without success or physical failure.
+2. **Time limit (`truncated=True`):** the configured limit is reached without success or physical failure: 500 decisions for Easy, 1,500 for Medium, 2,500 for Hard.
 3. **Physical failure (`terminated=True`):** excessive penetration, leaving the arena, non-finite state, MuJoCo warnings, excessive speed, or an unexpected automatic simulator reset is detected.
 
-The goal half-size is `(0.75, 0.65)` m. Its center is randomized during training; `(1.8, 1.5)` m remains the fixed diagnostic/legacy center. There is no single required yaw: any orientation that fits and satisfies the settling criteria is allowed. Diagnostics run after every physics substep. The linear speed threshold of 5 m/s and object yaw-rate threshold of 10 rad/s are failure checks, not velocity controllers.
+The goal half-size is `(0.75, 0.65)` m. Its center is randomized for Easy, fixed at `(1.8, 1.5)` m for Medium and `(3.25, 1.5)` m for Hard. There is no single required yaw: any orientation that fits and satisfies the settling criteria is allowed. Diagnostics run after every physics substep. The linear speed threshold of 5 m/s and object yaw-rate threshold of 10 rad/s are failure checks, not velocity controllers.
 
 ### Arena-Wide Random Resets
 
-Every newly started training process, including resume, **automatically** randomizes target, object pose, and agent positions over the arena. No command-line flag is required and the trainer enforces this distribution even if a supplied task configuration disables randomization.
+Every newly started training process, including resume, **automatically** randomizes object pose and agent positions. Easy also randomizes the target; Medium and Hard keep their configured target fixed. No new command-line flag is required. The trainer enforces random object/agent starts and fixed obstacle-task goals even when loading an older checkpoint.
 
 | Reset variable | Training distribution |
 | --- | --- |
@@ -255,9 +267,19 @@ Every newly started training process, including resume, **automatically** random
 
 Object position bounds depend on its orientation and exact compound footprint, rather than clamping a sampled body center after the fact. Invalid joint samples are rejected until a non-overlapping configuration is found. Goal visualization, actor observations, critic state, reward, and success checks all use the sampled target. Reset and terminal info include `initial_state` with the actual target, object pose and all agent positions, so episode logs/evaluation JSON can be audited.
 
+The table above describes Easy. For **Medium and Hard**, the complete object is sampled inside the leftmost room with full yaw randomization and the goal stays at its fixed position in the rightmost room. The 0.15 m object spawn margin applies to the room boundaries, including the divider. Agents are sampled independently across all rooms and openings, with at least 0.04 m clearance from bodies and walls. Minimum object-to-goal-center distance remains 1.5 m. Divider geometry never changes. Every valid task requires crossing all openings. The initial distribution thus varies positions and orientations, rather than switching the task direction.
+
 The same seed reproduces target, object pose, agent positions, and action-space sampling within the same software/model configuration. Training changes its episode seed; periodic validation intentionally repeats its validation seeds. The goal remains fixed during an episode. Broad randomization makes the learning task substantially different from the earlier near-contact formation.
 
-Legacy checkpoints without a reset-distribution marker keep their original fixed target and small pose noise **when evaluated**. New checkpoints store `reset_distribution: arena_wide`. When training resumes a legacy checkpoint, the trainer switches to arena-wide resets, resets actor/critic input-normalization statistics and the rolling episode-statistics window, and records the transition in `manifest.json`. Model weights and optimizer state are retained. Resume of an already arena-wide run preserves its normalization/statistics history. Fixed-reset options remain available for environment diagnostics and tests, not as a training CLI mode.
+Legacy checkpoints without a reset-distribution marker keep their original fixed target and small pose noise **when evaluated**. New checkpoints store `reset_distribution: arena_wide`. When training resumes a legacy checkpoint, the trainer switches to arena-wide resets, resets actor/critic input-normalization statistics and the rolling episode-statistics window, and records the transition in `manifest.json`. Model weights and optimizer state are retained. Resume of an already arena-wide run preserves its normalization/statistics history unless its goal distribution changes as described below. Fixed-reset options remain available for environment diagnostics and tests, not as a training CLI mode.
+
+Checkpoints also store `randomize_goal` explicitly. Older Medium checkpoints without this field keep their original randomized goals **during evaluation**, preserving comparisons with past results. Resuming them for training adopts the fixed configured goal, resets both input normalizers and the rolling episode-statistics window, and records `goal_distribution_changed` in the new manifest. Weights, optimizers and cumulative steps are retained. New fixed-goal Medium/Hard checkpoints preserve their fixed goals in evaluation and resume. An already-running Medium process keeps its old distribution until restarted/resumed with the updated code; changing files does not update an in-memory environment.
+
+To evaluate an older Medium policy specifically on the new fixed-target task, use the existing environment override and save the report separately from its original-task evaluation:
+
+```bash
+python scripts/evaluate.py results/mappo_medium/checkpoints/best.pt --env-config configs/environment_medium.yaml --device auto --episodes 50 --seed 200000 --json results/mappo_medium/eval_fixed_target_50.json
+```
 
 ## 5. MAPPO Algorithm
 
@@ -461,6 +483,17 @@ python -m unittest discover -s tests -v
 
 Tests cover physics, the Parallel API, observations, rewards, GAE, PPO updates, checkpoint selection, resume, and video milestones. PyTorch-dependent tests skip if PyTorch is missing; the video integration test requires Linux EGL, FFmpeg, and ffprobe. Passing only the environment tests does not validate MAPPO.
 
+### Inspect the Obstacle Arenas
+
+```bash
+python scripts/test_environment.py --config configs/environment_medium.yaml --policy random --render --episodes 1
+python scripts/test_environment.py --config configs/environment_medium.yaml --api-test
+python scripts/test_environment.py --config configs/environment_hard.yaml --policy random --render --episodes 1
+python scripts/test_environment.py --config configs/environment_hard.yaml --api-test
+```
+
+`--no-randomize` gives a fixed diagnostic start in the left room with the goal in the right room. The existing scripted Easy controller does not plan a route through the obstacle courses; use random/zero actions for diagnostics or the corresponding learned policy for evaluation.
+
 ### Train MAPPO: Smoke Run
 
 ```bash
@@ -490,6 +523,43 @@ python scripts/train.py --device cuda --total-steps 2000000 --eval-interval-step
 `--total-steps` (alias `--total-timesteps`) is the cumulative number of **team environment decisions**. One simultaneous action from all four agents counts as one timestep and produces one shared reward. It is not four timesteps or 50 physics substeps. The trainer stops at the requested budget, including a shorter final rollout when needed. Episode count remains a performance statistic; `--total-episodes` is no longer a supported training flag.
 
 With full 500-step episodes, 100,000 timesteps complete 200 episodes. Success or physical failure can shorten episodes, so the episode count is not a fixed training budget. A step budget still does not guarantee convergence.
+
+### Train a Separate Medium Policy
+
+```bash
+python scripts/train.py \
+  --env-config configs/environment_medium.yaml \
+  --device cuda \
+  --total-steps 2000000 \
+  --run-dir results/mappo_medium
+```
+
+Use `--device cpu` on a machine without CUDA. This starts a new policy with the existing MAPPO settings, TensorBoard logging, evaluation every 10,000 steps, 1080p video every 100,000 steps, and only `best.pt`/`latest.pt` checkpoints. Schedules are checked at rollout boundaries as described above. Two million steps is an initial experimental budget, not a success guarantee.
+
+To resume Medium, use its own checkpoint and a new run directory. An Easy resume restores the Easy task; `--env-config` cannot switch the task of a resumed run.
+
+```bash
+python scripts/train.py --resume results/mappo_medium/checkpoints/latest.pt --device cuda --total-steps 4000000 --run-dir results/mappo_medium_resume
+python scripts/evaluate.py results/mappo_medium/checkpoints/best.pt --device auto --episodes 50 --seed 200000 --json results/mappo_medium/eval_best_50.json --video-dir results/mappo_medium/videos/eval_best --video-episodes 3
+```
+
+Evaluation restores the saved Medium configuration and XML automatically. No additional difficulty argument is needed.
+
+### Train a Separate Hard Policy
+
+```bash
+python scripts/train.py \
+  --env-config configs/environment_hard.yaml \
+  --device cuda \
+  --total-steps 2000000 \
+  --run-dir results/mappo_hard
+```
+
+Hard starts a new policy independently of Medium, with the same MAPPO defaults, TensorBoard, 1080p recording every 100,000 steps, and only `best.pt`/`latest.pt`. There are 2,500 decisions per maximum-length episode. The goal remains `(3.25, 1.5)` m across training and evaluation. Two million steps is an initial experimental budget; learned success has not been established.
+
+```bash
+python scripts/evaluate.py results/mappo_hard/checkpoints/best.pt --device auto --episodes 50 --seed 200000 --json results/mappo_hard/eval_best_50.json --video-dir results/mappo_hard/videos/eval_best --video-episodes 3
+```
 
 ### Checkpoint Retention
 
@@ -644,7 +714,7 @@ The main research questions include:
 - How do observation availability and environmental constraints affect cooperation?
 - Can learned cooperative strategies generalize to different object configurations and obstacle layouts?
 
-Experiments with other agent counts, limited-range sensors, communication, internal obstacles/curricula, energy/collision reward ablations, and held-out layouts require additional implementation. They should not be reported as supported or solved by the current four-agent Easy baseline. Systematic results require multiple independent training seeds and an explicit evaluation protocol.
+Experiments with other agent counts, limited-range sensors, communication, more complex or randomized obstacle layouts, curricula, energy/collision reward ablations, and held-out layouts require additional implementation. The fixed Medium and Hard environments are implemented; learned success on them still needs to be demonstrated. Systematic results require multiple independent training seeds and an explicit evaluation protocol.
 
 ## 9. References
 

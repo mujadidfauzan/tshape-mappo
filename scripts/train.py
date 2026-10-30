@@ -1,4 +1,4 @@
-"""Train a shared-policy MAPPO baseline on the M2 Easy environment."""
+"""Train shared-policy MAPPO on an Easy, Medium or Hard environment."""
 
 import argparse
 from dataclasses import replace
