@@ -1,0 +1,5 @@
+mujoco==3.3.7
+numpy==1.26.4
+gymnasium==1.4.0
+pettingzoo==1.27.0
+PyYAML==6.0.3
