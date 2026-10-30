@@ -20,6 +20,12 @@ class RunningNormalizer(nn.Module):
         return normalized.clamp(-self.clip, self.clip)
 
     @torch.no_grad()
+    def reset(self):
+        self.mean.zero_()
+        self.variance.fill_(1)
+        self.count.zero_()
+
+    @torch.no_grad()
     def update(self, values):
         if not self.enabled:
             return

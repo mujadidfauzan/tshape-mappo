@@ -35,7 +35,8 @@ The environment supports simultaneous multi-agent actions, cooperative rewards, 
 - PPO clipped objective
 - Gaussian policy with `tanh` action transformation
 - Training, evaluation, checkpointing, and resume functionality
-- Automatic 1080p evaluation videos every 10,000 completed training episodes
+- Step-based training budgets, evaluation, checkpointing, and 1080p videos
+- TensorBoard graphs for rewards, success, episode length, losses, and throughput
 - Two retained training checkpoints: `best.pt` and `latest.pt`
 - Physics diagnostics and environment validation
 
@@ -237,9 +238,26 @@ An episode ends when:
 2. **Time limit (`truncated=True`):** 500 decisions are reached without success or physical failure.
 3. **Physical failure (`terminated=True`):** excessive penetration, leaving the arena, non-finite state, MuJoCo warnings, excessive speed, or an unexpected automatic simulator reset is detected.
 
-The goal center is `(1.8, 1.5)` m with half-size `(0.75, 0.65)` m. There is no single required yaw: any orientation that fits and satisfies the settling criteria is allowed. Diagnostics run after every physics substep. The linear speed threshold of 5 m/s and object yaw-rate threshold of 10 rad/s are failure checks, not velocity controllers.
+The goal half-size is `(0.75, 0.65)` m. Its center is randomized during training; `(1.8, 1.5)` m remains the fixed diagnostic/legacy center. There is no single required yaw: any orientation that fits and satisfies the settling criteria is allowed. Diagnostics run after every physics substep. The linear speed threshold of 5 m/s and object yaw-rate threshold of 10 rad/s are failure checks, not velocity controllers.
 
-Reset can randomize object XY position by +/-0.1 m, yaw by +/-0.15 rad, and agent spawn positions by +/-0.02 m. Overlapping/out-of-bounds spawns are rejected. Supplying the same seed reproduces reset and action-space sampling within the same software/model configuration.
+### Arena-Wide Random Resets
+
+Every newly started training process, including resume, **automatically** randomizes target, object pose, and agent positions over the arena. No command-line flag is required and the trainer enforces this distribution even if a supplied task configuration disables randomization.
+
+| Reset variable | Training distribution |
+| --- | --- |
+| Goal center | Across the arena, keeping the complete goal rectangle at least 0.15 m from the walls; default XY ranges are `[-2.0, 2.0]` and `[-2.1, 2.1]` m |
+| Object yaw | Sampled over `[-pi, pi]`, covering all orientations |
+| Object XY position | Across the feasible arena region for its sampled orientation, with all box corners at least 0.15 m from walls |
+| Each agent | Independently across the arena, with its complete disk at least 0.15 m from walls; no assigned starting formation |
+| Object-to-goal center distance | At least 1.5 m; already-solved initial states are rejected |
+| Agent/object and agent/agent clearance | At least 0.04 m between surfaces |
+
+Object position bounds depend on its orientation and exact compound footprint, rather than clamping a sampled body center after the fact. Invalid joint samples are rejected until a non-overlapping configuration is found. Goal visualization, actor observations, critic state, reward, and success checks all use the sampled target. Reset and terminal info include `initial_state` with the actual target, object pose and all agent positions, so episode logs/evaluation JSON can be audited.
+
+The same seed reproduces target, object pose, agent positions, and action-space sampling within the same software/model configuration. Training changes its episode seed; periodic validation intentionally repeats its validation seeds. The goal remains fixed during an episode. Broad randomization makes the learning task substantially different from the earlier near-contact formation.
+
+Legacy checkpoints without a reset-distribution marker keep their original fixed target and small pose noise **when evaluated**. New checkpoints store `reset_distribution: arena_wide`. When training resumes a legacy checkpoint, the trainer switches to arena-wide resets, resets actor/critic input-normalization statistics and the rolling episode-statistics window, and records the transition in `manifest.json`. Model weights and optimizer state are retained. Resume of an already arena-wide run preserves its normalization/statistics history. Fixed-reset options remain available for environment diagnostics and tests, not as a training CLI mode.
 
 ## 5. MAPPO Algorithm
 
@@ -336,11 +354,15 @@ Defaults come from [mappo.yaml](configs/mappo.yaml), not from guaranteed optimal
 | Entropy coefficient / value coefficient | 0.01 / 0.5 |
 | Maximum gradient norm | 0.5 |
 | Target KL for early stopping | 0.03 |
-| Evaluation interval / episodes | Every 10 PPO updates / 5 episodes |
-| Latest-checkpoint interval | Every 10 PPO updates, at video milestones, and on normal completion |
-| Video interval | Every 10,000 completed training episodes |
+| Evaluation interval / episodes | Every 10,000 team steps / 5 episodes |
+| Latest-checkpoint interval | Every 10,000 team steps, at video milestones, and on normal completion |
+| Video interval | Every 100,000 team steps |
+| Rolling episode-statistics window | 100 completed episodes |
+| Raw reward sampling interval | Every 100 team steps; set to 1 for every step |
 
 A rollout of 1,024 team decisions provides 4,096 actor samples and 1,024 team-value samples. Training currently uses one environment process.
+
+Step schedules are checked **after PPO updates**, at rollout boundaries. A threshold of 10,000 is reached at step 10,240 with the default rollout; the 100,000-step video threshold is reached at 100,352. One evaluation/video is produced for the thresholds crossed by an update, rather than repeating identical evaluations if several thresholds were crossed. Final evaluation and checkpoint saving also run when the exact step budget is exhausted.
 
 ## 6. Installation
 
@@ -368,12 +390,14 @@ python -m pip install -r requirements.txt
 
 `requirements.txt` installs the physics/environment dependencies only: MuJoCo 3.3.7, NumPy 1.26.4, Gymnasium 1.4.0, PettingZoo 1.27.0, and PyYAML 6.0.3.
 
-For MAPPO on CPU, also install PyTorch and the training requirements:
+For MAPPO on CPU, also install PyTorch and the training requirements (including TensorBoard):
 
 ```bash
 python -m pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -r requirements-training.txt
 ```
+
+The training requirements pin TensorBoard 2.20.0 and a compatible setuptools version for its CLI. TensorFlow is not required for these PyTorch scalar logs.
 
 For CUDA, use the matching PyTorch 2.6.0 build from the [official previous-version installation instructions](https://pytorch.org/get-started/previous-versions/). TorchVision and TorchAudio are not required. Installing the CUDA build does not parallelize the single MuJoCo environment.
 
@@ -449,7 +473,7 @@ python scripts/train.py \
 
 This 2,048-step run checks the pipeline; it does not establish learned transport success. All examples require a new `--run-dir` so existing runs are not overwritten.
 
-### Train MAPPO: Baseline and Episode Budget
+### Train MAPPO: Total Timesteps
 
 Run the default 100,000-step baseline:
 
@@ -457,15 +481,15 @@ Run the default 100,000-step baseline:
 python scripts/train.py --config configs/mappo.yaml --env-config configs/environment.yaml --device cpu --run-dir results/mappo_baseline
 ```
 
-For a budget of 20,000 completed episodes and automatic videos every 10,000 episodes:
+For a longer GPU run with an explicit step budget and independent schedules:
 
 ```bash
-python scripts/train.py --device cpu --total-episodes 20000 --video-interval-episodes 10000 --run-dir results/mappo_video
+python scripts/train.py --device cuda --total-steps 2000000 --eval-interval-steps 10000 --video-interval-steps 100000 --run-dir results/mappo_video
 ```
 
-`--total-episodes` takes precedence over YAML `total_steps`. The CLI accepts only one of `--total-steps` and `--total-episodes`; an explicit `--total-steps` clears a YAML episode budget. Budgets are cumulative on resume.
+`--total-steps` (alias `--total-timesteps`) is the cumulative number of **team environment decisions**. One simultaneous action from all four agents counts as one timestep and produces one shared reward. It is not four timesteps or 50 physics substeps. The trainer stops at the requested budget, including a shorter final rollout when needed. Episode count remains a performance statistic; `--total-episodes` is no longer a supported training flag.
 
-**Episodes and steps are different counters.** With 500 decisions per episode, 100,000 steps complete 200 episodes, and 10,000 full-length episodes require 5,000,000 steps. Episodes ending early require fewer steps. Training budget does not guarantee convergence.
+With full 500-step episodes, 100,000 timesteps complete 200 episodes. Success or physical failure can shorten episodes, so the episode count is not a fixed training budget. A step budget still does not guarantee convergence.
 
 ### Checkpoint Retention
 
@@ -474,9 +498,9 @@ Each new run retains only these model files:
 | File | When it is replaced |
 | --- | --- |
 | `checkpoints/best.pt` | When evaluation improves: higher success rate first, then higher mean return |
-| `checkpoints/latest.pt` | Every `checkpoint_interval` PPO updates, at a video milestone, and on normal completion |
+| `checkpoints/latest.pt` | Every `checkpoint_interval_steps` team steps at a rollout boundary, at a video milestone, and on normal completion |
 
-The default checkpoint interval is 10 updates. Numbered update/episode checkpoints and `last.pt` are no longer created by the updated trainer. Old files in existing runs are not deleted. Checkpoint writes use a temporary file and atomic replacement.
+The default checkpoint threshold interval is 10,000 steps. Numbered update/episode checkpoints and `last.pt` are no longer created by the updated trainer. Old files in existing runs are not deleted. Checkpoint writes use a temporary file and atomic replacement.
 
 `latest.pt` represents the most recent save, not every environment step; work collected after that save is not present if a run is interrupted.
 
@@ -492,15 +516,17 @@ From a run created with the updated trainer:
 python scripts/train.py --resume results/mappo_baseline/checkpoints/latest.pt --total-steps 200000 --device cpu --run-dir results/mappo_baseline_resume
 ```
 
-For an episode-budget run:
+To continue a legacy run that used an episode budget, explicitly replace its budget with a cumulative step target:
 
 ```bash
-python scripts/train.py --resume results/mappo_video/checkpoints/latest.pt --total-episodes 30000 --device cpu --run-dir results/mappo_video_resume
+python scripts/train.py --resume results/mappo_video/checkpoints/latest.pt --total-steps 2000000 --eval-interval-steps 10000 --video-interval-steps 100000 --device cuda --run-dir results/mappo_video_resume
 ```
 
-The target must exceed the saved budget counter. Resume restores MAPPO/environment settings; the CLI permits changing budget, device, and video interval. Do not pass `--config`, `--env-config`, `--seed`, or `--rollout-steps` to override a resumed run.
+The target must exceed the saved timestep count; it includes prior training rather than adding that many new steps. For example, resuming from 1,350,000 steps with a 2,000,000-step target collects 650,000 additional steps. A legacy episode-budget checkpoint requires an explicit `--total-steps` to avoid carrying over an unintended budget. Legacy YAML with `total_episodes` also requires an explicit step override.
 
-Resume starts a fresh physics episode and discards any partial rollout/episode. It restores RNG and optimizers but is not an exact continuation of uninterrupted training. Completed-episode/video counters are restored; a discarded partial episode does not count as completed. Older checkpoints without this counter use `episode_index` as an estimate. Each resumed run selects its own `best.pt`; the previous run retains its previous best.
+Resume restores MAPPO and physics/task settings, while enforcing arena-wide random resets as described above. The CLI permits changing step budget, device, interval flags, `--tensorboard`/`--no-tensorboard`, and `--reward-log-interval-steps`. Do not pass `--config`, `--env-config`, `--seed`, or `--rollout-steps` to override a resumed run. Old `eval_interval`/`checkpoint_interval` values are converted from update counts to step intervals using the saved rollout length. A positive legacy `video_interval_episodes` becomes the new default 100,000-step interval (zero remains disabled); provide `--video-interval-steps` to choose another interval.
+
+Resume starts a fresh physics episode and discards any partial rollout/episode. It restores RNG and optimizers but is not an exact continuation of uninterrupted training. Completed-episode and rolling-statistics history are restored; a discarded partial episode does not count as completed. Old checkpoints without rolling statistics start a new statistics window; old completed-episode counters may use `episode_index` as an estimate. Schedules continue at the next global step multiple, without replaying missed videos. Each resumed run selects its own `best.pt`; the previous run retains its previous best.
 
 ### Evaluate or Record a Policy Manually
 
@@ -512,48 +538,94 @@ python scripts/evaluate.py results/mappo_baseline/checkpoints/best.pt --episodes
 
 The manual video is `results/mappo_baseline/videos/manual/policy_seed_200000.mp4`. Add `--stochastic` to sample actions; the default uses `tanh(mean)`. Evaluation restores the checkpoint's XML and normalization. `--env-config` explicitly selects a different environment for transfer tests. `--trajectory-dir` saves NPZ states, qpos, actions, rewards, times, and terminal flags.
 
+The evaluation CLI prints a checkpoint-loading message, the actual device, episode starts, progress every 100 steps or about five seconds between completed steps, video initialization/finalization, and each episode's result. All progress lines flush immediately. Use `--progress-interval-steps` to change the step interval or `--quiet` to hide live progress. CPU policy inference defaults to one PyTorch thread, adjustable with `--torch-threads`.
+
+With `--json`, the report is written atomically at startup and after each episode. During evaluation it has `complete=false`, `requested_episodes`, and `completed_episodes`; normal completion sets `complete=true`. Completed reports survive Ctrl+C, which exits with code 130. Old evaluator processes do not acquire these changes while already running.
+
+`--video-dir` alone records **every** evaluation episode. Evaluating 50 episodes with that flag creates 50 MP4s and includes rendering/encoding time. To evaluate 50 episodes while recording only the first three:
+
+```bash
+python scripts/evaluate.py results/mappo_baseline/checkpoints/best.pt --device auto --episodes 50 --seed 200000 --json results/mappo_baseline/evaluation_50.json --video-dir results/mappo_baseline/videos/eval_best --video-episodes 3
+```
+
+During encoding, the current file has a `.partial.mp4` suffix; it is renamed after the encoder finishes. A leftover partial file alone does not establish that a process is still running. Separate video subdirectories keep these recordings distinct from training logs and other evaluations.
+
 ### Automatic Evaluation Videos
 
 Video settings in `configs/mappo.yaml` are:
 
 ```yaml
-video_interval_episodes: 10000
+video_interval_steps: 100000
 video_width: 1920
 video_height: 1080
 video_crf: 18
 ```
 
-At 10,000, 20,000, and subsequent completed training episodes, a separate environment records one deterministic evaluation episode on seed 100000. Successes, timeouts, and physical failures each count once toward the training counter; video evaluations do not count. Sampling/normalization during training is preserved.
+At the rollout boundary reaching 100,000, 200,000, and subsequent team-step thresholds, a separate environment records one deterministic evaluation episode on seed 100000. Evaluation/video steps do not increase the training step counter. Training sampling and normalization are preserved.
 
 Output for the first milestone:
 
 ```text
-results/mappo_video/videos/episode_010000/
+results/mappo_video/videos/step_000100352/
 ├── policy_seed_100000.mp4
 └── evaluation.json
 ```
 
 Videos use the top camera, native 1920 x 1080 frames, H.264/MP4, and CRF 18. Frame rate follows the control interval: 20 fps by default. Recording includes the initial state, so a 500-step episode contains 501 frames and lasts 25.05 seconds. Frames stream to FFmpeg instead of accumulating in RAM.
 
-At a recording milestone, `latest.pt` is replaced with the policy being recorded, before the next PPO update. Video metadata identifies its episode, step, update, and XML hash. Its `checkpoint` path points to the mutable `latest.pt`, with `checkpoint_is_overwritten=true`: later saves replace those weights, so historical videos do not retain a separate recoverable model snapshot.
+At a recording milestone, `latest.pt` is replaced with the updated policy being recorded. Video metadata identifies the threshold (`scheduled_step`), actual step, episode count, update, and XML hash. Its `checkpoint` path points to the mutable `latest.pt`, with `checkpoint_is_overwritten=true`: later saves replace those weights, so historical videos do not retain a separate recoverable model snapshot.
 
-Set `--video-interval-episodes 0` to disable automatic recording. Manual evaluation accepts `--video-width`, `--video-height`, and `--video-crf`; frame dimensions must be even. Startup checks the renderer/encoder when the configured budget could reach a recording milestone.
+Set `--video-interval-steps 0` to disable automatic recording. Manual evaluation accepts `--video-width`, `--video-height`, and `--video-crf`; frame dimensions must be even. Startup checks the renderer/encoder when the configured budget could reach a recording milestone.
 
 ### Logs and Run Artifacts
 
-The console prints PPO update, budget progress, policy/value loss, and `episodes`, which counts episodes ending within that rollout. For episode budgets, `episodes_total` shows cumulative completed episodes. Evaluation prints success rate and mean return every 10 updates by default and on normal completion. Richer training metrics are saved to disk even though the console does not print them all.
+The console prints PPO update, cumulative step budget, completed episodes, rolling mean return, success/stability rates, mean episode length, statistics-window size, rollout mean reward, steps per second (`fps`), and losses. The rolling metrics use the most recent 100 completed episodes by default. Before any episode finishes they show `n/a`, not a fabricated zero. FPS measures team decisions per wall-clock second during the current process, including updates and intervening evaluations/videos. The GPU accelerates the networks; this code still runs MuJoCo in a single CPU environment.
 
 | Artifact | Contents |
 | --- | --- |
 | `manifest.json` | Resolved settings, software versions, feature schema, device, resume source, XML hash |
 | `arena.xml`, `environment.yaml`, `mappo.yaml` | Model/configuration snapshots for that run |
 | `episodes.jsonl` | Team return, seed, success, stability, end reason, distance, path length, wall contacts, control effort, penetration |
-| `updates.jsonl` | Losses, entropy, KL, clipping, gradients, explained variance, sample counts, and episode metrics |
-| `evaluation_XXXXXX.json` | Deterministic evaluation indexed by PPO update |
+| `updates.jsonl` | Losses, KL, entropy, throughput, all-transition reward/component means, rolling and rollout episode metrics |
+| `evaluation_XXXXXX.json` | Deterministic evaluation indexed by PPO update, including actual and scheduled step metadata |
 | `checkpoints/best.pt`, `checkpoints/latest.pt` | The two retained training model files |
-| `videos/episode_XXXXXX/` | Milestone video and its evaluation report |
+| `videos/step_XXXXXXXXX/` | Video and evaluation report indexed by actual training step |
+| `tensorboard/events.out.tfevents.*` | Training/evaluation scalars with cumulative timesteps as the X axis |
 
-`mean_episode_return`, `rollout_success_rate`, and `rollout_stable_rate` appear in update logs only when at least one episode ends in that rollout. `episodes=0` does not mean training stopped. Control effort is integrated squared actuator force in N²·s, not mechanical energy. Wall collision events count new contact-pair occurrences rather than every contact frame.
+`mean_episode_return`, `rollout_success_rate`, and `rollout_stable_rate` retain their per-rollout meaning and appear only when an episode ends in that rollout. `rolling_episode_stats` instead uses the last `stats_window_size` completed episodes and remains available across rollouts with no completed episode. Control effort is integrated squared actuator force in N²·s, not mechanical energy. Wall collision events count new contact-pair occurrences rather than every contact frame.
+
+### TensorBoard Monitoring
+
+TensorBoard is enabled by default and installed through `requirements-training.txt`. Open it while training runs:
+
+```bash
+tensorboard --logdir results --port 6006
+```
+
+Visit `http://localhost:6006` on that machine. For an SSH remote, run this on your local computer and keep the tunnel open:
+
+```bash
+ssh -L 6006:localhost:6006 USER@REMOTE_HOST
+```
+
+The TensorBoard process runs on the remote PC; your local browser uses `http://localhost:6006`. If another process uses port 6006, choose matching alternative ports.
+
+| Scalar tags | Meaning |
+| --- | --- |
+| `rollout/ep_rew_mean`, `rollout/ep_len_mean` | Mean episode return/length over the recent completed-episode window |
+| `rollout/success_rate`, `rollout/stable_rate` | Recent training fractions in [0, 1] |
+| `rollout/window_episodes` | Actual number of completed episodes used in that window |
+| `episode/return`, `episode/length`, `episode/success`, `episode/stable` | Individual completed-episode values, located at their terminal timestep |
+| `reward/step` | Raw shared reward sampled every `reward_log_interval_steps` (default 100) |
+| `reward/mean_step` | Mean reward across every transition in the rollout |
+| `reward/progress_mean`, `reward/time_mean`, `reward/success_mean`, `reward/failure_mean` | Mean weighted reward components across all rollout transitions; sum to `reward/mean_step` within rounding |
+| `eval/mean_return`, `eval/success_rate`, `eval/stable_rate` | Separate deterministic validation results |
+| `train/policy_loss`, `train/value_loss`, `train/entropy`, `train/approx_kl` | PPO update diagnostics |
+| `time/fps`, `time/total_timesteps`, `time/episodes` | Throughput and cumulative progress |
+
+Reward is computed on **every** environment step. Default raw sampling reduces event-file size and may miss isolated bonuses; rollout component means include them all. Set `--reward-log-interval-steps 1` to graph every raw step reward, or 0 to omit raw samples. Episode return is a sum of rewards; it is not the same quantity as mean reward per step. Rolling reward metrics describe stochastic training, while `eval/` metrics describe deterministic evaluation.
+
+Use `--no-tensorboard` to keep JSON/console logging without writing event files. Resume writes a new run directory but continues scalar X coordinates from the saved timestep count. Existing JSON-only runs are preserved; their historical points are not automatically imported into TensorBoard. The integration uses [PyTorch SummaryWriter](https://docs.pytorch.org/docs/2.6/tensorboard.html).
 
 Low policy/value loss alone does not demonstrate successful transport. Compare return, success, stability, motion, and videos. Default evaluation reuses five validation seeds (100000-100004); this is not a generalization benchmark or five independent training seeds. Deterministic evaluation and stochastic training can have different success rates.
 

@@ -15,7 +15,8 @@ class EnvironmentConfigTests(unittest.TestCase):
         for config in ({"max_step": 5}, {"frame_skip": 1.5}, {"max_steps": 0},
                        {"goal_center": [float("nan"), 0]}, {"goal_half_size": [0, 1]},
                        {"object_position_noise": [-1, 0]}, {"time_penalty": -1},
-                       {"randomize_reset": "false"}):
+                       {"randomize_reset": "false"}, {"reset_distribution": "unknown"},
+                       {"arena_spawn_margin": -1}, {"minimum_goal_distance": -1}):
             with self.subTest(config=config):
                 with self.assertRaises(ValueError):
                     load_config(config)

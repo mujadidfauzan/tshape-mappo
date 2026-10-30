@@ -10,7 +10,9 @@ class MAPPOConfigTests(unittest.TestCase):
         self.assertEqual(config.rollout_steps, 1024)
         self.assertEqual(config.num_minibatches, 1)
         self.assertEqual(config.gamma, 0.99)
-        self.assertEqual(config.video_interval_episodes, 10000)
+        self.assertEqual(config.video_interval_steps, 100000)
+        self.assertEqual(config.eval_interval_steps, 10000)
+        self.assertTrue(config.tensorboard)
         self.assertEqual((config.video_width, config.video_height), (1920, 1080))
 
     def test_invalid_training_settings_are_rejected(self):
@@ -20,10 +22,20 @@ class MAPPOConfigTests(unittest.TestCase):
                        {"rollout_steps": 2, "num_minibatches": 3}, {"total_step": 5},
                        {"total_episodes": 0}, {"total_episodes": True},
                        {"video_interval_episodes": -1}, {"video_width": 1919},
-                       {"video_height": 0}, {"video_crf": 52}):
+                       {"video_height": 0}, {"video_crf": 52}, {"stats_window_size": 0},
+                       {"tensorboard": "yes"}, {"eval_interval_steps": 0},
+                       {"reward_log_interval_steps": -1}, {"video_interval_steps": True}):
             with self.subTest(config=config):
                 with self.assertRaises(ValueError):
                     load_mappo_config(config)
+
+    def test_legacy_update_intervals_are_converted_to_steps(self):
+        config = load_mappo_config({"rollout_steps": 256, "eval_interval": 10,
+                                   "checkpoint_interval": 5, "video_interval_episodes": 10000})
+        self.assertEqual(config.eval_interval_steps, 2560)
+        self.assertEqual(config.checkpoint_interval_steps, 1280)
+        self.assertEqual(config.video_interval_steps, 100000)
+        self.assertNotIn("eval_interval", config.to_dict())
 
 
 if __name__ == "__main__":

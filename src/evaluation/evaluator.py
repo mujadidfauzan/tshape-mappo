@@ -10,11 +10,30 @@ import torch
 from src.envs.tshape_env import TShapeParallelEnv
 
 
+def summarize_reports(reports):
+    successful_times = [r["completion_time_s"] for r in reports if r["success"] and not r["interrupted"]]
+    returns = [r["episode_metrics"]["episode_return"] for r in reports]
+    return {"episodes": len(reports),
+            "success_rate": sum(r["success"] and not r["interrupted"] for r in reports) / len(reports) if reports else None,
+            "stable_rate": sum(r["stable"] for r in reports) / len(reports) if reports else None,
+            "mean_return": float(np.mean(returns)) if returns else None,
+            "std_return": float(np.std(returns)) if returns else None,
+            "mean_completion_time_s": float(np.mean(successful_times)) if successful_times else None,
+            "completion_time_episodes": len(successful_times)}
+
+
 def evaluate_policy(agent, environment_config, episodes=5, seed=100000, deterministic=True,
                     render=False, trajectory_dir=None, video_dir=None,
-                    video_width=1920, video_height=1080, video_crf=18):
+                    video_width=1920, video_height=1080, video_crf=18,
+                    progress_callback=None, progress_interval_steps=100, video_episodes=None):
     if episodes < 1 or seed < 0:
         raise ValueError("episodes must be positive and seed nonnegative")
+    if progress_callback is not None and not callable(progress_callback):
+        raise ValueError("progress_callback must be callable")
+    if isinstance(progress_interval_steps, bool) or not isinstance(progress_interval_steps, int) or progress_interval_steps < 1:
+        raise ValueError("progress_interval_steps must be a positive integer")
+    if video_episodes is not None and (isinstance(video_episodes, bool) or not isinstance(video_episodes, int) or video_episodes < 0):
+        raise ValueError("video_episodes must be a nonnegative integer or None")
     env = TShapeParallelEnv(config=environment_config, render_mode="human" if render else None)
     expected = agent.dimensions
     if (env.obs_dim != expected["observation_size"] or env.state_space.shape[0] != expected["state_size"]
@@ -34,11 +53,19 @@ def evaluate_policy(agent, environment_config, episodes=5, seed=100000, determin
                 with torch.cuda.device(agent.device):
                     torch.cuda.manual_seed(seed)
             for episode in range(episodes):
+                episode_started = last_progress = time.perf_counter()
+                def notify(event, **details):
+                    if progress_callback is not None:
+                        progress_callback({"event": event, "episode": episode + 1, "episodes": episodes,
+                            "seed": seed + episode, "wall_seconds": time.perf_counter() - episode_started,
+                            **details})
+                notify("episode_start")
                 observations, infos = env.reset(seed=seed + episode)
                 video = None
-                if video_dir is not None:
+                if video_dir is not None and (video_episodes is None or episode < video_episodes):
                     from .video import EpisodeVideo
                     path = Path(video_dir) / f"policy_seed_{seed + episode}.mp4"
+                    notify("video_start", path=str(path), width=video_width, height=video_height)
                     video = recordings.enter_context(EpisodeVideo(
                         env.physics, path, video_width, video_height, video_crf))
                     video.capture()
@@ -58,6 +85,12 @@ def evaluate_policy(agent, environment_config, episodes=5, seed=100000, determin
                     final_info = infos[names[0]]
                     if video is not None:
                         video.capture()
+                    now = time.perf_counter()
+                    if (final_info["episode_step"] % progress_interval_steps == 0 or now - last_progress >= 5.0):
+                        notify("episode_progress", step=final_info["episode_step"], max_steps=env.max_steps,
+                               episode_return=final_info["episode_metrics"]["episode_return"],
+                               distance_to_goal=final_info["distance_to_goal"])
+                        last_progress = now
                     if trajectory_dir is not None:
                         action_log.append(action_array)
                         rewards_log.append(rewards[names[0]])
@@ -72,6 +105,7 @@ def evaluate_policy(agent, environment_config, episodes=5, seed=100000, determin
                         if remaining > 0:
                             time.sleep(remaining)
                 if video is not None:
+                    notify("video_finalizing", path=str(video.path))
                     video.close()
                 trajectory = None
                 if trajectory_dir is not None:
@@ -89,17 +123,10 @@ def evaluate_policy(agent, environment_config, episodes=5, seed=100000, determin
                 reports.append({"seed": seed + episode, "deterministic": deterministic,
                                 "interrupted": interrupted, "trajectory": trajectory,
                                 "video": video.metadata() if video is not None else None, **final_info})
+                notify("episode_end", report=reports[-1])
                 if interrupted:
                     break
     finally:
         agent.train(was_training)
         env.close()
-    successful_times = [r["completion_time_s"] for r in reports if r["success"] and not r["interrupted"]]
-    returns = [r["episode_metrics"]["episode_return"] for r in reports]
-    return {"reports": reports, "summary": {
-        "episodes": len(reports), "success_rate": sum(r["success"] and not r["interrupted"] for r in reports) / len(reports),
-        "stable_rate": sum(r["stable"] for r in reports) / len(reports),
-        "mean_return": float(np.mean(returns)), "std_return": float(np.std(returns)),
-        "mean_completion_time_s": float(np.mean(successful_times)) if successful_times else None,
-        "completion_time_episodes": len(successful_times),
-    }}
+    return {"reports": reports, "summary": summarize_reports(reports)}

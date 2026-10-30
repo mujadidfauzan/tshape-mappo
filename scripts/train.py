@@ -1,6 +1,7 @@
 """Train a shared-policy MAPPO baseline on the M2 Easy environment."""
 
 import argparse
+from dataclasses import replace
 import os
 from pathlib import Path
 import sys
@@ -16,30 +17,32 @@ def main():
     parser.add_argument("--config", type=Path, help="MAPPO YAML; defaults to configs/mappo.yaml")
     parser.add_argument("--env-config", type=Path, help="environment YAML; default configs/environment.yaml")
     parser.add_argument("--run-dir", type=Path, help="new directory for logs, model snapshot and checkpoints")
-    budget = parser.add_mutually_exclusive_group()
-    budget.add_argument("--total-steps", type=int, help="total team environment decisions, including previous steps on resume")
-    budget.add_argument("--total-episodes", type=int, help="cumulative completed episodes; replaces the step budget")
-    parser.add_argument("--video-interval-episodes", type=int, help="record every N completed episodes; 0 disables videos")
+    parser.add_argument("--total-steps", "--total-timesteps", dest="total_steps", type=int,
+                        help="cumulative team environment decisions, including saved steps on resume")
+    parser.add_argument("--video-interval-steps", type=int, help="record every N steps at rollout boundaries; 0 disables videos")
+    parser.add_argument("--eval-interval-steps", type=int)
+    parser.add_argument("--checkpoint-interval-steps", type=int)
+    parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--reward-log-interval-steps", type=int, help="sample raw reward every N steps; 1 logs every step; 0 disables raw samples")
     parser.add_argument("--rollout-steps", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--device", choices=["cpu", "auto", "cuda"])
     parser.add_argument("--resume", type=Path, help="restore training; starts a new episode and output directory")
     args = parser.parse_args()
-    overrides = {"total_episodes": args.total_episodes}
+    config = load_mappo_config(args.config)
     if args.total_steps is not None:
-        from dataclasses import replace
-        # An explicit step budget also clears an episode budget in the YAML.
-        config = replace(load_mappo_config(args.config), total_episodes=None)
-    else:
-        config = load_mappo_config(args.config)
-    config = load_mappo_config(config, total_steps=args.total_steps, **overrides,
-                               video_interval_episodes=args.video_interval_episodes, rollout_steps=args.rollout_steps,
-                               seed=args.seed, device=args.device)
+        config = replace(config, total_episodes=None)
+    config = load_mappo_config(config, total_steps=args.total_steps,
+                               video_interval_steps=args.video_interval_steps,
+                               eval_interval_steps=args.eval_interval_steps,
+                               checkpoint_interval_steps=args.checkpoint_interval_steps,
+                               tensorboard=args.tensorboard, reward_log_interval_steps=args.reward_log_interval_steps,
+                               rollout_steps=args.rollout_steps, seed=args.seed, device=args.device)
     if args.resume:
         if args.run_dir is None:
             parser.error("resume requires --run-dir pointing to a new output directory")
         if args.seed is not None or args.rollout_steps is not None or args.config is not None:
-            parser.error("resume restores MAPPO settings; only budget, device and video interval may override them")
+            parser.error("resume restores MAPPO settings; only step budget, device, logging and schedule flags may override them")
     if sys.platform.startswith("linux"):
         os.environ.setdefault("MUJOCO_GL", "egl")
     try:
@@ -50,9 +53,12 @@ def main():
         raise
     run_dir = args.run_dir or ROOT / "results" / f"mappo_seed{config.seed}"
     trainer = Trainer(run_dir, config, args.env_config, args.resume,
-                      resume_episode_budget=args.total_episodes,
                       resume_step_budget=args.total_steps,
-                      resume_video_interval=args.video_interval_episodes)
+                      resume_video_interval=args.video_interval_steps,
+                      resume_eval_interval=args.eval_interval_steps,
+                      resume_checkpoint_interval=args.checkpoint_interval_steps,
+                      resume_tensorboard=args.tensorboard,
+                      resume_reward_interval=args.reward_log_interval_steps)
     print(f"Run: {trainer.run_dir}; device: {trainer.agent.device}", flush=True)
     trainer.train()
     return 0

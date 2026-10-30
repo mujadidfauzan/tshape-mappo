@@ -1,6 +1,8 @@
 """Tiny end-to-end smoke run; does not assert that an untrained policy succeeds."""
 
 from dataclasses import replace
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -21,7 +23,7 @@ except ModuleNotFoundError:
 class TrainingTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe") and sys.platform.startswith("linux"),
                          "requires FFmpeg, ffprobe and Linux EGL for the video integration test")
-    def test_episode_video_milestones_encode_1080p_and_resume_counts_completed_episodes(self):
+    def test_step_video_milestones_encode_1080p_and_resume_counts_completed_episodes(self):
         import yaml
         from src.algorithms.mappo import MAPPO
         root = Path(__file__).resolve().parents[1]
@@ -30,19 +32,20 @@ class TrainingTests(unittest.TestCase):
             config = path / "mappo.yaml"
             config.write_text(yaml.safe_dump({"rollout_steps": 3, "ppo_epochs": 1,
                 "actor_hidden_size": 8, "critic_hidden_size": 8,
-                "eval_episodes": 1, "video_interval_episodes": 1}))
+                "eval_episodes": 1, "video_interval_steps": 3}))
             environment = path / "environment.yaml"
             environment.write_text(yaml.safe_dump({"max_steps": 2, "randomize_reset": False}))
             run = path / "initial"
             variables = {**os.environ, "MUJOCO_GL": "egl"}
             command = [sys.executable, str(root / "scripts/train.py"), "--config", str(config),
-                       "--env-config", str(environment), "--total-episodes", "2", "--run-dir", str(run)]
+                       "--env-config", str(environment), "--total-steps", "6", "--run-dir", str(run)]
             completed = subprocess.run(command, cwd=root, env=variables, capture_output=True, text=True, timeout=120)
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            for episode in (1, 2):
-                folder = run / "videos" / f"episode_{episode:06d}"
+            for step, episodes in ((3, 1), (6, 3)):
+                folder = run / "videos" / f"step_{step:09d}"
                 report = json.loads((folder / "evaluation.json").read_text())
-                self.assertEqual(report["training_episodes"], episode)
+                self.assertEqual(report["training_episodes"], episodes)
+                self.assertEqual(report["environment_steps"], step)
                 video = report["reports"][0]["video"]
                 probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
                     "-show_entries", "stream=width,height,codec_name,nb_frames,r_frame_rate", "-of", "json",
@@ -60,8 +63,8 @@ class TrainingTests(unittest.TestCase):
             # the learned parameters, normalization and the training RNG.
             without_video = path / "without_video"
             command = [sys.executable, str(root / "scripts/train.py"), "--config", str(config),
-                       "--env-config", str(environment), "--total-episodes", "2",
-                       "--video-interval-episodes", "0", "--run-dir", str(without_video)]
+                       "--env-config", str(environment), "--total-steps", "6",
+                       "--video-interval-steps", "0", "--run-dir", str(without_video)]
             completed = subprocess.run(command, cwd=root, env=variables, capture_output=True, text=True, timeout=120)
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             _, recorded = MAPPO.from_checkpoint(run / "checkpoints/latest.pt")
@@ -73,13 +76,13 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual((run / "episodes.jsonl").read_text(), (without_video / "episodes.jsonl").read_text())
             resumed = path / "resumed"
             command = [sys.executable, str(root / "scripts/train.py"), "--resume",
-                       str(run / "checkpoints/latest.pt"), "--total-episodes", "3", "--run-dir", str(resumed)]
+                       str(run / "checkpoints/latest.pt"), "--total-steps", "9", "--run-dir", str(resumed)]
             completed = subprocess.run(command, cwd=root, env=variables, capture_output=True, text=True, timeout=120)
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             folders = list((resumed / "videos").iterdir())
-            self.assertEqual([p.name for p in folders], ["episode_000003"])
+            self.assertEqual([p.name for p in folders], ["step_000000009"])
             _, payload = MAPPO.from_checkpoint(resumed / "checkpoints/latest.pt")
-            self.assertEqual(payload["training"]["completed_episodes"], 3)
+            self.assertEqual(payload["training"]["completed_episodes"], 4)
             self.assertEqual({p.name for p in (resumed / "checkpoints").iterdir()}, {"best.pt", "latest.pt"})
 
     def test_short_run_writes_loadable_checkpoint_and_can_resume(self):
@@ -89,11 +92,14 @@ class TrainingTests(unittest.TestCase):
         from src.training.trainer import Trainer
         config = MAPPOConfig(total_steps=4, rollout_steps=2, ppo_epochs=1,
                              actor_hidden_size=8, critic_hidden_size=8,
-                             eval_episodes=1, eval_interval=2, checkpoint_interval=2)
+                             eval_episodes=1, eval_interval_steps=4, checkpoint_interval_steps=4,
+                             reward_log_interval_steps=1)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             trainer = Trainer(path / "initial", config=config,
                               environment_config={"max_steps": 2, "randomize_reset": False})
+            self.assertTrue(trainer.environment_config.randomize_reset)
+            self.assertEqual(trainer.environment_config.reset_distribution, "arena_wide")
             summary = trainer.train()
             self.assertEqual(summary["environment_steps"], 4)
             checkpoint = path / "initial" / "checkpoints" / "latest.pt"
@@ -101,6 +107,17 @@ class TrainingTests(unittest.TestCase):
             self.assertTrue((path / "initial" / "updates.jsonl").is_file())
             agent, payload = MAPPO.from_checkpoint(checkpoint)
             self.assertEqual(payload["training"]["environment_steps"], 4)
+            from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+            events = EventAccumulator(str(path / "initial" / "tensorboard"), size_guidance={"scalars": 0})
+            events.Reload()
+            self.assertEqual([e.step for e in events.Scalars("reward/step")], [1, 2, 3, 4])
+            self.assertEqual([e.step for e in events.Scalars("train/policy_loss")], [2, 4])
+            self.assertEqual([e.step for e in events.Scalars("rollout/ep_rew_mean")], [2, 4])
+            self.assertEqual([e.step for e in events.Scalars("eval/success_rate")], [4])
+            for event in events.Scalars("reward/mean_step"):
+                total = sum(next(e.value for e in events.Scalars("reward/" + key + "_mean") if e.step == event.step)
+                            for key in ("progress", "time", "success", "failure"))
+                self.assertAlmostEqual(event.value, total, places=6)
             before_rng = torch.get_rng_state().clone()
             before_count = agent.obs_normalizer.count.clone()
             evaluation = evaluate_policy(agent, trainer.environment_config, episodes=1, seed=9000)
@@ -111,6 +128,10 @@ class TrainingTests(unittest.TestCase):
             result = resumed.train()
             self.assertEqual(result["environment_steps"], 6)
             self.assertTrue((path / "resumed" / "checkpoints" / "latest.pt").is_file())
+            resumed_events = EventAccumulator(str(path / "resumed" / "tensorboard"))
+            resumed_events.Reload()
+            self.assertEqual([e.step for e in resumed_events.Scalars("reward/step")], [5, 6])
+            self.assertEqual(resumed_events.Scalars("rollout/window_episodes")[-1].value, 3)
 
     def test_latest_advances_while_best_retains_the_better_evaluation(self):
         from src.algorithms.mappo import MAPPO
@@ -118,8 +139,8 @@ class TrainingTests(unittest.TestCase):
         from src.training.trainer import Trainer
         config = MAPPOConfig(total_steps=4, rollout_steps=2, ppo_epochs=1,
                              actor_hidden_size=8, critic_hidden_size=8,
-                             eval_episodes=1, eval_interval=1, checkpoint_interval=1,
-                             video_interval_episodes=0)
+                             eval_episodes=1, eval_interval_steps=2, checkpoint_interval_steps=2,
+                             video_interval_steps=0)
         scores = [{"summary": {"success_rate": 1.0, "mean_return": 20.0}},
                   {"summary": {"success_rate": 0.0, "mean_return": 2.0}}]
         with tempfile.TemporaryDirectory() as directory:
@@ -145,6 +166,65 @@ class TrainingTests(unittest.TestCase):
             trainer.episode_index = i
             actual.append(trainer.episode_seed())
         self.assertEqual(actual, [42, 43, 46, 47, 48, 49])
+
+    def test_step_schedule_crossings_and_empty_episode_statistics(self):
+        from src.training.config import MAPPOConfig
+        from src.training.trainer import Trainer
+        config = MAPPOConfig(total_steps=7, rollout_steps=3, ppo_epochs=1,
+                             actor_hidden_size=8, critic_hidden_size=8, tensorboard=False,
+                             eval_interval_steps=4, checkpoint_interval_steps=4, video_interval_steps=0)
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run"
+            trainer = Trainer(run, config=config, environment_config={"max_steps": 10})
+            output = io.StringIO()
+            score = {"summary": {"success_rate": 0.0, "mean_return": -.01}}
+            with patch("src.training.trainer.evaluate_policy", return_value=score.copy()), redirect_stdout(output):
+                summary = trainer.train()
+            self.assertEqual(summary["environment_steps"], 7)
+            self.assertEqual(summary["completed_episodes"], 0)
+            reports = [json.loads(p.read_text()) for p in sorted(run.glob("evaluation_*.json"))]
+            self.assertEqual([r["environment_steps"] for r in reports], [6, 7])
+            self.assertEqual([r["scheduled_step"] for r in reports], [4, None])
+            self.assertIn("return_mean=n/a success=n/a stable=n/a window=0", output.getvalue())
+            self.assertFalse((run / "tensorboard").exists())
+
+    def test_legacy_episode_checkpoint_requires_an_explicit_step_budget(self):
+        from src.algorithms.mappo import MAPPO
+        from src.training.config import MAPPOConfig
+        from src.training.trainer import Trainer
+        config = MAPPOConfig(total_steps=2, rollout_steps=2, ppo_epochs=1,
+                             actor_hidden_size=8, critic_hidden_size=8, eval_episodes=1,
+                             tensorboard=False, video_interval_steps=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            Trainer(path / "initial", config, environment_config={"max_steps": 2}).train()
+            _, payload = MAPPO.from_checkpoint(path / "initial/checkpoints/latest.pt")
+            settings = payload["mappo_config"]
+            settings["total_episodes"] = 100000
+            settings["eval_interval"] = 10
+            settings["checkpoint_interval"] = 10
+            settings["video_interval_episodes"] = 0
+            for key in ("eval_interval_steps", "checkpoint_interval_steps", "video_interval_steps"):
+                settings.pop(key)
+            payload["training"].pop("episode_stats")
+            payload["training"]["environment_config"].pop("reset_distribution", None)
+            legacy = path / "legacy_last.pt"
+            torch.save(payload, legacy)
+            with self.assertRaisesRegex(ValueError, "--total-steps"):
+                Trainer(path / "no_budget", replace(config, total_steps=4), resume=legacy)
+            resumed = Trainer(path / "resumed", config, resume=legacy,
+                              resume_step_budget=4, resume_eval_interval=2)
+            self.assertEqual(resumed.env.config.reset_distribution, "arena_wide")
+            self.assertEqual(resumed.agent.obs_normalizer.count.item(), 0)
+            self.assertEqual(resumed.agent.state_normalizer.count.item(), 0)
+            self.assertEqual(resumed.episode_stats.summary(), {"window_episodes": 0})
+            manifest = json.loads((path / "resumed/manifest.json").read_text())
+            self.assertTrue(manifest["reset_distribution_changed"])
+            self.assertTrue(manifest["normalization_reset"])
+            result = resumed.train()
+            self.assertEqual(result["environment_steps"], 4)
+            _, saved = MAPPO.from_checkpoint(path / "resumed/checkpoints/latest.pt")
+            self.assertNotIn("total_episodes", saved["mappo_config"])
 
 
 if __name__ == "__main__":

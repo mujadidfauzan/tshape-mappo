@@ -11,11 +11,11 @@ success_linear_speed: 0.05
 success_angular_speed: 0.1
 success_hold_steps: 5
 
-# Seeded reset; noise is uniform +/- the specified amount (m or rad).
+# Training always uses arena-wide randomization; no CLI flag is needed.
 randomize_reset: true
-object_position_noise: [0.1, 0.1]
-object_yaw_noise: 0.15
-agent_position_noise: 0.02
+reset_distribution: arena_wide
+arena_spawn_margin: 0.15
+minimum_goal_distance: 1.5
 spawn_clearance: 0.04
 reset_attempts: 100
 

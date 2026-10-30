@@ -22,6 +22,10 @@ class EnvironmentConfig:
     success_angular_speed: float = 0.1
     success_hold_steps: int = 5
     randomize_reset: bool = True
+    reset_distribution: str = "arena_wide"
+    arena_spawn_margin: float = 0.15
+    minimum_goal_distance: float = 1.5
+    # Retained for reproduction of legacy checkpoint reset distributions.
     object_position_noise: tuple = (0.1, 0.1)
     object_yaw_noise: float = 0.15
     agent_position_noise: float = 0.02
@@ -43,6 +47,8 @@ class EnvironmentConfig:
             object.__setattr__(self, name, int(value))
         if not isinstance(self.randomize_reset, bool):
             raise ValueError("randomize_reset must be a boolean")
+        if self.reset_distribution not in ("arena_wide", "legacy"):
+            raise ValueError("reset_distribution must be arena_wide or legacy")
         for name in ("goal_center", "goal_half_size", "object_position_noise"):
             value = np.asarray(getattr(self, name), dtype=np.float64)
             if value.shape != (2,) or not np.isfinite(value).all():
@@ -57,6 +63,7 @@ class EnvironmentConfig:
             "agent_position_noise", "spawn_clearance", "progress_weight",
             "success_reward", "time_penalty", "failure_penalty", "max_penetration",
             "max_linear_speed", "max_angular_speed",
+            "arena_spawn_margin", "minimum_goal_distance",
         )
         for name in scalar_names:
             value = float(getattr(self, name))
@@ -96,3 +103,8 @@ def load_config(config=None, **overrides):
             raise ValueError(f"unknown environment configuration keys: {sorted(unknown)}")
         result = EnvironmentConfig(**values)
     return replace(result, **{key: value for key, value in overrides.items() if value is not None})
+
+
+def load_checkpoint_config(values):
+    """Old checkpoints retain their original reset semantics during evaluation."""
+    return load_config({"reset_distribution": "legacy", **values})

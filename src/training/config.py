@@ -17,7 +17,7 @@ class MAPPOConfig:
     seed: int = 42
     device: str = "cpu"
     total_steps: int = 100000
-    total_episodes: int | None = None
+    total_episodes: int | None = None  # Read legacy checkpoints; not a supported training budget.
     rollout_steps: int = 1024
     ppo_epochs: int = 5
     num_minibatches: int = 1
@@ -36,20 +36,23 @@ class MAPPOConfig:
     initial_log_std: float = -0.5
     normalize_inputs: bool = True
     normalization_clip: float = 10.0
-    checkpoint_interval: int = 10
-    eval_interval: int = 10
+    checkpoint_interval_steps: int = 10000
+    eval_interval_steps: int = 10000
     eval_episodes: int = 5
     eval_seed: int = 100000
     torch_threads: int = 1
-    video_interval_episodes: int = 10000
+    video_interval_steps: int = 100000
     video_width: int = 1920
     video_height: int = 1080
     video_crf: int = 18
+    tensorboard: bool = True
+    stats_window_size: int = 100
+    reward_log_interval_steps: int = 100
 
     def __post_init__(self):
         integer_fields = ("total_steps", "rollout_steps", "ppo_epochs", "num_minibatches",
-                          "actor_hidden_size", "critic_hidden_size", "checkpoint_interval",
-                          "eval_interval", "eval_episodes", "torch_threads")
+                          "actor_hidden_size", "critic_hidden_size", "checkpoint_interval_steps",
+                          "eval_interval_steps", "eval_episodes", "torch_threads", "stats_window_size")
         for name in (*integer_fields, "seed", "eval_seed"):
             value = getattr(self, name)
             minimum = 0 if name in ("seed", "eval_seed") else 1
@@ -60,7 +63,7 @@ class MAPPOConfig:
         if self.total_episodes is not None and (isinstance(self.total_episodes, bool)
                 or not isinstance(self.total_episodes, int) or self.total_episodes < 1):
             raise ValueError("total_episodes must be a positive integer or null")
-        for name in ("video_interval_episodes", "video_width", "video_height", "video_crf"):
+        for name in ("video_interval_steps", "video_width", "video_height", "video_crf", "reward_log_interval_steps"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
@@ -70,6 +73,8 @@ class MAPPOConfig:
             raise ValueError("video_crf must lie in [0, 51]")
         if not isinstance(self.normalize_inputs, bool):
             raise ValueError("normalize_inputs must be boolean")
+        if not isinstance(self.tensorboard, bool):
+            raise ValueError("tensorboard must be boolean")
         if not isinstance(self.device, str) or (self.device not in ("cpu", "auto", "cuda")
                                                 and not (self.device.startswith("cuda:")
                                                          and self.device[5:].isdigit())):
@@ -96,7 +101,10 @@ class MAPPOConfig:
             raise ValueError("initial_log_std must lie in [-5, 2]")
 
     def to_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        if result["total_episodes"] is None:
+            result.pop("total_episodes")
+        return result
 
 
 def load_mappo_config(config=None, **overrides):
@@ -110,6 +118,21 @@ def load_mappo_config(config=None, **overrides):
                 config = yaml.safe_load(stream)
         if not isinstance(config, Mapping):
             raise ValueError("MAPPO configuration must be a mapping")
+        config = dict(config)
+        # Old checkpoints measured evaluation/checkpoint intervals in PPO updates.
+        for old, new in (("eval_interval", "eval_interval_steps"),
+                         ("checkpoint_interval", "checkpoint_interval_steps")):
+            if old in config:
+                interval = config.pop(old)
+                if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
+                    raise ValueError(f"legacy {old} must be a positive integer")
+                config.setdefault(new, interval * config.get("rollout_steps", 1024))
+        if "video_interval_episodes" in config:
+            interval = config.pop("video_interval_episodes")
+            if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0:
+                raise ValueError("legacy video_interval_episodes must be a nonnegative integer")
+            # An episode interval cannot be converted to steps with a fixed ratio.
+            config.setdefault("video_interval_steps", 0 if interval == 0 else 100000)
         unknown = set(config) - {field.name for field in fields(MAPPOConfig)}
         if unknown:
             raise ValueError(f"unknown MAPPO keys: {sorted(unknown)}")

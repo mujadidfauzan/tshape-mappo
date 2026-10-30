@@ -188,7 +188,7 @@ class EnvironmentTests(unittest.TestCase):
         # Regression for results/m2_validation.json (step 185, 5.065 mm).
         # This test is intentionally a full episode, not an isolated target check.
         from src.envs.scripted import scripted_actions
-        env = self.make_env(randomize_reset=True)
+        env = self.make_env(randomize_reset=True, reset_distribution="legacy")
         env.reset(seed=46)
         info = None
         while env.agents:

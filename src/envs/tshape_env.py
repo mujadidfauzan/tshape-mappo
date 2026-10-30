@@ -31,9 +31,14 @@ class TShapeParallelEnv(ParallelEnv):
         self.goal_hold_count = 0
         self.goal_center = np.asarray(cfg.goal_center, dtype=np.float64)
         self.goal_half_size = np.asarray(cfg.goal_half_size, dtype=np.float64)
+        self._object_local_corners = (self.physics.object_corners()
+            - self.physics.data.xpos[self.physics.object_body, :2]) @ self.physics.rotation()
         if (np.any(self.goal_center - self.goal_half_size < self.physics.lower)
                 or np.any(self.goal_center + self.goal_half_size > self.physics.upper)):
             raise ValueError("goal rectangle must be entirely inside the arena")
+        if cfg.reset_distribution == "arena_wide" and np.any(
+                2 * (self.goal_half_size + cfg.arena_spawn_margin) >= self.physics.upper - self.physics.lower):
+            raise ValueError("goal rectangle and spawn margin leave no room for target randomization")
         self.render_mode = render_mode
         self.viewer = None
         self.metadata = {**type(self).metadata, "render_fps": max(1, round(1 / self.physics.control_dt))}
@@ -93,6 +98,9 @@ class TShapeParallelEnv(ParallelEnv):
 
     def _spawn_positions(self, pose, randomize):
         p = self.physics
+        if randomize and self.config.reset_distribution == "arena_wide":
+            margin = self.config.arena_spawn_margin + p.radii[:, None]
+            return self.np_random.uniform(p.lower + margin, p.upper - margin)
         top = p.model.geom("t_horizontal")
         stem = p.model.geom("t_vertical")
         gap = self.config.spawn_clearance
@@ -109,6 +117,21 @@ class TShapeParallelEnv(ParallelEnv):
                                             self.config.agent_position_noise, (4, 2))
         c, s = np.cos(pose[2]), np.sin(pose[2])
         return local @ np.array([[c, s], [-s, c]]) + pose[:2]
+
+    def _sample_object_pose(self):
+        p = self.physics
+        yaw = self.np_random.uniform(-np.pi, np.pi)
+        c, s = np.cos(yaw), np.sin(yaw)
+        corners = self._object_local_corners @ np.array([[c, s], [-s, c]])
+        lower = p.lower + self.config.arena_spawn_margin - corners.min(axis=0)
+        upper = p.upper - self.config.arena_spawn_margin - corners.max(axis=0)
+        if np.any(lower > upper):
+            raise ValueError("transported object cannot fit within the arena spawn margin")
+        return np.r_[self.np_random.uniform(lower, upper), yaw]
+
+    def _sample_goal(self):
+        margin = self.goal_half_size + self.config.arena_spawn_margin
+        return self.np_random.uniform(self.physics.lower + margin, self.physics.upper - margin)
 
     def reset(self, seed=None, options=None):
         if seed is not None or not hasattr(self, "np_random"):
@@ -131,8 +154,13 @@ class TShapeParallelEnv(ParallelEnv):
         lock = self.viewer.lock() if self.viewer is not None else nullcontext()
         with lock:
             for _ in range(self.config.reset_attempts):
+                wide = randomize and self.config.reset_distribution == "arena_wide"
+                self.goal_center[:] = self._sample_goal() if wide else self.config.goal_center
+                self.physics.model.site("goal").pos[:2] = self.goal_center
                 if explicit_pose is not None:
                     pose = explicit_pose.copy()
+                elif wide:
+                    pose = self._sample_object_pose()
                 else:
                     pose = np.r_[self.physics.model.body_pos[self.physics.object_body, :2], 0.0]
                     if randomize:
@@ -142,13 +170,16 @@ class TShapeParallelEnv(ParallelEnv):
                                                          self.config.object_yaw_noise)
                 positions = explicit_agents if explicit_agents is not None else self._spawn_positions(pose, randomize)
                 self.physics.reset(pose, positions)
+                if wide and (self._distance_to_goal() < self.config.minimum_goal_distance or self.object_inside_goal()):
+                    continue
                 # Reserve a small positive margin even when noise is disabled.
-                if self.physics.spawn_is_valid(clearance=0.005):
+                clearance = max(0.005, self.config.spawn_clearance) if wide else 0.005
+                if self.physics.spawn_is_valid(clearance=clearance):
                     break
                 if not randomize or (explicit_pose is not None and explicit_agents is not None):
                     raise ValueError("requested reset overlaps an agent, object, or wall")
             else:
-                raise ValueError("could not sample a collision-free reset; reduce noise or adjust spawn_clearance")
+                raise ValueError("could not sample a valid reset; check geometry, margins and goal separation")
             self.steps = 0
             self.goal_hold_count = 0
             self.agents = self.possible_agents.copy()
@@ -159,6 +190,12 @@ class TShapeParallelEnv(ParallelEnv):
             self._last_observations = None
             self._physics_failed = False
             self._failure_details = None
+            positions, _ = self.physics.get_agents_state()
+            obj = self.physics.get_object_state()
+            self._initial_state = {"goal_center": self.goal_center.tolist(),
+                "object_position": obj["position"].tolist(), "object_yaw": obj["yaw"],
+                "agent_positions": positions.tolist(), "reset_distribution": self.config.reset_distribution,
+                "randomized": randomize}
             observations = self._observations()
             self._last_observations = {name: obs.copy() for name, obs in observations.items()}
             self._last_state = self.state()
@@ -172,6 +209,7 @@ class TShapeParallelEnv(ParallelEnv):
     def _copy_info(info):
         return {**info, "reward_components": info["reward_components"].copy(),
                 "failure_details": deepcopy(info["failure_details"]),
+                "initial_state": deepcopy(info.get("initial_state")),
                 "episode_metrics": info["episode_metrics"].copy()}
 
     def _info(self, success, stable, progress, components, end_reason, failure_reason):
@@ -185,6 +223,8 @@ class TShapeParallelEnv(ParallelEnv):
                 "goal_hold_steps": self.goal_hold_count, "end_reason": end_reason,
                 "failure_reason": failure_reason, "reward_components": components,
                 "failure_details": self._failure_details,
+                "goal_center": self.goal_center.tolist(),
+                "initial_state": self._initial_state if self.steps == 0 or end_reason is not None else None,
                 "episode_metrics": self._metrics.copy()}
 
     def step(self, actions):

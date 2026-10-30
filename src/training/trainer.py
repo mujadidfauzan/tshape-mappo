@@ -13,11 +13,12 @@ import yaml
 
 from src.algorithms.mappo import MAPPO
 from src.algorithms.rollout_buffer import RolloutBuffer
-from src.envs.config import load_config
+from src.envs.config import load_config, load_checkpoint_config
 from src.envs.observations import ACTOR_FEATURES, STATE_FEATURES
 from src.envs.tshape_env import TShapeParallelEnv
 from src.evaluation.evaluator import evaluate_policy
 from .config import load_mappo_config
+from .logging import EpisodeStats, RunLogger
 
 
 def feature_schema():
@@ -31,15 +32,19 @@ def write_json(path, payload):
 
 class Trainer:
     def __init__(self, run_dir, config=None, environment_config=None, resume=None,
-                 resume_episode_budget=None, resume_step_budget=None, resume_video_interval=None):
+                 resume_step_budget=None, resume_video_interval=None, resume_eval_interval=None,
+                 resume_checkpoint_interval=None, resume_tensorboard=None, resume_reward_interval=None):
         cfg = self.config = load_mappo_config(config)
+        if cfg.total_episodes is not None:
+            raise ValueError("Episode budgets are no longer used; set total_steps/--total-steps instead")
         torch.set_num_threads(cfg.torch_threads)
         torch.manual_seed(cfg.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(cfg.seed)
         self.rng = np.random.default_rng(cfg.seed)
         self.steps = self.updates = self.episode_index = 0
-        self.completed_episodes = self.last_video_episode = 0
+        self.completed_episodes = self.last_video_step = 0
+        self.episode_stats = EpisodeStats(cfg.stats_window_size)
         self.best_score = (-1.0, -float("inf"))
         self.agent = None
         self.resume_source = str(Path(resume).resolve()) if resume is not None else None
@@ -56,19 +61,29 @@ class Trainer:
                 raise ValueError("checkpoint observation schema does not match this implementation")
             # Budget, device and recording cadence may change on resume.
             previous_cfg = load_mappo_config(payload["mappo_config"])
-            episode_budget = (resume_episode_budget if resume_episode_budget is not None else
-                              None if resume_step_budget is not None else
-                              cfg.total_episodes if cfg.total_episodes is not None else previous_cfg.total_episodes)
-            cfg = self.config = replace(previous_cfg, total_steps=cfg.total_steps, device=cfg.device,
-                                       total_episodes=episode_budget,
-                                       video_interval_episodes=(previous_cfg.video_interval_episodes
-                                           if resume_video_interval is None else resume_video_interval))
+            if previous_cfg.total_episodes is not None and resume_step_budget is None:
+                raise ValueError("Legacy episode-budget checkpoint: supply --total-steps explicitly to resume")
+            cfg = self.config = replace(previous_cfg,
+                                       total_steps=(cfg.total_steps if resume_step_budget is None else resume_step_budget),
+                                       device=cfg.device,
+                                       total_episodes=None,
+                                       video_interval_steps=(previous_cfg.video_interval_steps
+                                           if resume_video_interval is None else resume_video_interval),
+                                       eval_interval_steps=(previous_cfg.eval_interval_steps
+                                           if resume_eval_interval is None else resume_eval_interval),
+                                       checkpoint_interval_steps=(previous_cfg.checkpoint_interval_steps
+                                           if resume_checkpoint_interval is None else resume_checkpoint_interval),
+                                       tensorboard=(previous_cfg.tensorboard
+                                           if resume_tensorboard is None else resume_tensorboard),
+                                       reward_log_interval_steps=(previous_cfg.reward_log_interval_steps
+                                           if resume_reward_interval is None else resume_reward_interval))
             self.agent.config = cfg
             torch.set_num_threads(cfg.torch_threads)
             self.steps = training["environment_steps"]
             self.updates = training["updates"]
             self.completed_episodes = training.get("completed_episodes", training["episode_index"])
-            self.last_video_episode = training.get("last_video_episode", 0)
+            self.last_video_step = training.get("last_video_step", 0)
+            self.episode_stats = EpisodeStats(cfg.stats_window_size, training.get("episode_stats", ()))
             # Resume starts a fresh episode: no warm-start of partially collected
             # MuJoCo state. Use the next episode seed so the dropped start isn't reused.
             self.episode_index = training["episode_index"] + 1
@@ -79,12 +94,20 @@ class Trainer:
             torch.set_rng_state(training["torch_rng_state"])
             if self.agent.device.type == "cuda" and training.get("cuda_rng_state") is not None:
                 torch.cuda.set_rng_state(training["cuda_rng_state"], self.agent.device)
-            base_env = load_config(training["environment_config"])
+            base_env = load_checkpoint_config(training["environment_config"])
             model_xml = training["model_xml"]
             if hashlib.sha256(model_xml.encode()).hexdigest() != training["model_sha256"]:
                 raise ValueError("checkpoint XML hash mismatch")
             if self._budget_reached():
                 raise ValueError("training budget must exceed the steps/episodes already in the checkpoint")
+        # All newly started training, including resume, uses broad randomization.
+        previous_reset_distribution = base_env.reset_distribution
+        reset_distribution_changed = previous_reset_distribution != "arena_wide" or not base_env.randomize_reset
+        base_env = replace(base_env, reset_distribution="arena_wide", randomize_reset=True)
+        if self.agent is not None and reset_distribution_changed:
+            self.agent.obs_normalizer.reset()
+            self.agent.state_normalizer.reset()
+            self.episode_stats = EpisodeStats(cfg.stats_window_size)
         # Require a new directory; never overwrite another experiment's results.
         self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=False)
@@ -100,24 +123,33 @@ class Trainer:
             self.agent = MAPPO(**dimensions, config=cfg)
         elif self.agent.dimensions != dimensions:
             raise ValueError("checkpoint dimensions do not match the environment")
-        interval = cfg.video_interval_episodes
-        next_video = (self.completed_episodes // interval + 1) * interval if interval else None
-        maximum_episodes = (cfg.total_episodes if cfg.total_episodes is not None else
-                            self.completed_episodes + cfg.total_steps - self.steps)
-        if next_video is not None and maximum_episodes >= next_video:
+        self.next_eval_step = self._next_threshold(cfg.eval_interval_steps)
+        self.next_checkpoint_step = self._next_threshold(cfg.checkpoint_interval_steps)
+        self.next_video_step = self._next_threshold(cfg.video_interval_steps)
+        if self.next_video_step is not None and cfg.total_steps >= self.next_video_step:
             from src.evaluation.video import check_video_support
             try:
                 check_video_support(self.environment_config, cfg.video_width, cfg.video_height, cfg.video_crf)
             except Exception:
                 self.env.close()
                 raise
+        try:
+            self.logger = RunLogger(self.run_dir, cfg.tensorboard, cfg.reward_log_interval_steps)
+        except Exception:
+            self.env.close()
+            raise
         self.software = {name: str(version(name)) for name in
                          ("torch", "mujoco", "numpy", "gymnasium", "pettingzoo", "PyYAML")}
+        if cfg.tensorboard:
+            self.software["tensorboard"] = str(version("tensorboard"))
         manifest = {"mappo": cfg.to_dict(), "environment": self.environment_config.to_dict(),
                     "software": self.software, "model_sha256": self.model_hash,
                     "feature_schema": feature_schema(), "resume_source": self.resume_source,
                     "previous_run_best_score": self.resume_best_score,
                     "actual_device": str(self.agent.device),
+                    "previous_reset_distribution": previous_reset_distribution,
+                    "reset_distribution_changed": reset_distribution_changed,
+                    "normalization_reset": self.agent is not None and resume is not None and reset_distribution_changed,
                     "completed_episodes_at_start": self.completed_episodes,
                     "resume_starts_new_episode": resume is not None}
         write_json(self.run_dir / "manifest.json", manifest)
@@ -133,7 +165,8 @@ class Trainer:
                     "environment_steps": self.steps, "updates": self.updates,
                     "episode_index": self.episode_index,
                     "completed_episodes": self.completed_episodes,
-                    "last_video_episode": self.last_video_episode,
+                    "last_video_step": self.last_video_step,
+                    "episode_stats": self.episode_stats.state_dict(),
                     "best_score": list(self.best_score) if self.best_score[0] >= 0 else None,
                     "minibatch_rng_state": self.rng.bit_generator.state,
                     "torch_rng_state": torch.get_rng_state(),
@@ -142,25 +175,26 @@ class Trainer:
         self.agent.save_checkpoint(self.run_dir / "checkpoints" / name, training)
 
     def _budget_reached(self):
-        if self.config.total_episodes is not None:
-            return self.completed_episodes >= self.config.total_episodes
         return self.steps >= self.config.total_steps
 
-    def _record_video(self):
-        episode = self.completed_episodes
-        directory = self.run_dir / "videos" / f"episode_{episode:06d}"
-        self.last_video_episode = episode
+    def _next_threshold(self, interval):
+        return (self.steps // interval + 1) * interval if interval else None
+
+    def _record_video(self, scheduled_step):
+        directory = self.run_dir / "videos" / f"step_{self.steps:09d}"
+        self.last_video_step = self.steps
         self.checkpoint("latest.pt")
         result = evaluate_policy(
             self.agent, self.environment_config, episodes=1, seed=self.config.eval_seed,
             video_dir=directory, video_width=self.config.video_width,
             video_height=self.config.video_height, video_crf=self.config.video_crf)
-        result.update(training_episodes=episode, environment_steps=self.steps,
+        result.update(training_episodes=self.completed_episodes, environment_steps=self.steps,
+                      scheduled_step=scheduled_step,
                       updates=self.updates, model_sha256=self.model_hash,
                       checkpoint=str(self.run_dir / "checkpoints" / "latest.pt"),
                       checkpoint_is_overwritten=True)
         write_json(directory / "evaluation.json", result)
-        print(f"  video episode={episode}: {result['reports'][0]['video']['path']}", flush=True)
+        print(f"  video steps={self.steps}: {result['reports'][0]['video']['path']}", flush=True)
 
     def episode_seed(self):
         """Skip the fixed validation seed range even during a very long run."""
@@ -178,13 +212,14 @@ class Trainer:
         names = env.possible_agents
         observations, _ = env.reset(seed=self.episode_seed())
         started = time.perf_counter()
+        initial_steps = self.steps
         try:
             with (self.run_dir / "episodes.jsonl").open("a") as episode_log, (self.run_dir / "updates.jsonl").open("a") as update_log:
                 while not self._budget_reached():
-                    capacity = (cfg.rollout_steps if cfg.total_episodes is not None else
-                                min(cfg.rollout_steps, cfg.total_steps - self.steps))
+                    capacity = min(cfg.rollout_steps, cfg.total_steps - self.steps)
                     buffer = RolloutBuffer(capacity, **agent.dimensions)
                     completed = []
+                    component_totals = {key: 0.0 for key in ("progress", "time", "success", "failure")}
                     for _ in range(capacity):
                         obs_array = np.stack([observations[name] for name in names])
                         state = env.state()
@@ -198,6 +233,9 @@ class Trainer:
                         buffer.add(obs_array, state, latent, log_probs, rewards[names[0]],
                                    value, next_value, term, trunc)
                         self.steps += 1
+                        self.logger.reward(rewards[names[0]], self.steps)
+                        for key, value in infos[names[0]]["reward_components"].items():
+                            component_totals[key] += value
                         observations = next_obs
                         if term or trunc:
                             info = infos[names[0]]
@@ -207,20 +245,27 @@ class Trainer:
                             episode_log.write(json.dumps(record, allow_nan=False) + "\n")
                             episode_log.flush()
                             completed.append(info)
+                            self.episode_stats.add(info)
+                            self.logger.scalars("episode", {"return": info["episode_metrics"]["episode_return"],
+                                "length": info["episode_step"], "success": int(info["success"]),
+                                "stable": int(info["stable"])}, self.steps)
                             self.completed_episodes += 1
                             self.episode_index += 1
-                            if (cfg.video_interval_episodes and
-                                    self.completed_episodes % cfg.video_interval_episodes == 0 and
-                                    self.completed_episodes > self.last_video_episode):
-                                self._record_video()
                             if self._budget_reached():
                                 break
                             observations, _ = env.reset(seed=self.episode_seed())
                     metrics = agent.update(buffer, self.rng)
                     self.updates += 1
+                    elapsed = time.perf_counter() - started
+                    speed = (self.steps - initial_steps) / max(elapsed, 1e-9)
+                    rolling = self.episode_stats.summary()
+                    reward_means = {key + "_mean": value / buffer.size for key, value in component_totals.items()}
+                    reward_mean = float(np.mean(buffer.rewards[:buffer.size]))
                     record = {"environment_steps": self.steps, "update": self.updates,
                               "total_completed_episodes": self.completed_episodes,
-                              "wall_seconds": time.perf_counter() - started,
+                              "wall_seconds": elapsed, "fps": speed,
+                              "reward_mean_step": reward_mean, "reward_components_mean": reward_means,
+                              "rolling_episode_stats": rolling,
                               "completed_episodes": len(completed), **metrics}
                     if completed:
                         record.update(mean_episode_return=float(np.mean([i["episode_metrics"]["episode_return"] for i in completed])),
@@ -228,23 +273,42 @@ class Trainer:
                                       rollout_stable_rate=sum(i["stable"] for i in completed) / len(completed))
                     update_log.write(json.dumps(record, allow_nan=False) + "\n")
                     update_log.flush()
-                    budget = (f"steps={self.steps} episodes_total={self.completed_episodes}/{cfg.total_episodes}" if cfg.total_episodes
-                              else f"steps={self.steps}/{cfg.total_steps}")
-                    print(f"update={self.updates} {budget} "
-                          f"policy_loss={metrics['policy_loss']:.4f} value_loss={metrics['value_loss']:.4f} "
-                          f"episodes={len(completed)}", flush=True)
+                    self.logger.scalars("train", metrics, self.steps)
+                    self.logger.scalars("rollout", rolling, self.steps)
+                    self.logger.scalars("reward", {"mean_step": reward_mean, **reward_means}, self.steps)
+                    self.logger.scalars("time", {"fps": speed, "elapsed_s": elapsed,
+                        "total_timesteps": self.steps, "episodes": self.completed_episodes}, self.steps)
+                    performance = (f"return_mean={rolling['ep_rew_mean']:.3f} "
+                        f"success={rolling['success_rate']:.1%} stable={rolling['stable_rate']:.1%} "
+                        f"ep_len={rolling['ep_len_mean']:.1f} window={rolling['window_episodes']}"
+                        if rolling["window_episodes"] else "return_mean=n/a success=n/a stable=n/a window=0")
+                    print(f"update={self.updates} steps={self.steps}/{cfg.total_steps} "
+                          f"episodes_total={self.completed_episodes} {performance} "
+                          f"reward_step_mean={reward_mean:.4f} fps={speed:.1f} "
+                          f"policy_loss={metrics['policy_loss']:.4f} value_loss={metrics['value_loss']:.4f}", flush=True)
                     final = self._budget_reached()
-                    if self.updates % cfg.eval_interval == 0 or final:
+                    if self.steps >= self.next_eval_step or final:
                         evaluation = evaluate_policy(agent, self.environment_config, cfg.eval_episodes, cfg.eval_seed)
+                        evaluation.update(environment_steps=self.steps, update=self.updates,
+                                          scheduled_step=(self.next_eval_step if self.steps >= self.next_eval_step else None),
+                                          final=final)
                         write_json(self.run_dir / f"evaluation_{self.updates:06d}.json", evaluation)
+                        self.logger.scalars("eval", evaluation["summary"], self.steps)
                         score = (evaluation["summary"]["success_rate"], evaluation["summary"]["mean_return"])
                         if score > self.best_score:
                             self.best_score = score
                             self.checkpoint("best.pt")
-                        print(f"  eval success={score[0]:.1%} mean_return={score[1]:.3f}", flush=True)
-                    if self.updates % cfg.checkpoint_interval == 0 or final:
+                        print(f"  eval steps={self.steps} success={score[0]:.1%} mean_return={score[1]:.3f}", flush=True)
+                        self.next_eval_step = self._next_threshold(cfg.eval_interval_steps)
+                    if self.next_video_step is not None and self.steps >= self.next_video_step:
+                        self._record_video(self.next_video_step)
+                        self.next_video_step = self._next_threshold(cfg.video_interval_steps)
+                    if self.steps >= self.next_checkpoint_step or final:
                         self.checkpoint("latest.pt")
+                        self.next_checkpoint_step = self._next_threshold(cfg.checkpoint_interval_steps)
+                    self.logger.flush()
         finally:
+            self.logger.close()
             env.close()
         return {"environment_steps": self.steps, "updates": self.updates,
                 "completed_episodes": self.completed_episodes,
