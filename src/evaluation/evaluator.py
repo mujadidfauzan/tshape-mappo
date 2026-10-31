@@ -3,6 +3,8 @@
 from contextlib import ExitStack
 from pathlib import Path
 import time
+import math
+from collections import Counter
 
 import numpy as np
 import torch
@@ -13,13 +15,39 @@ from src.envs.tshape_env import TShapeParallelEnv
 def summarize_reports(reports):
     successful_times = [r["completion_time_s"] for r in reports if r["success"] and not r["interrupted"]]
     returns = [r["episode_metrics"]["episode_return"] for r in reports]
-    return {"episodes": len(reports),
+    result = {"episodes": len(reports),
             "success_rate": sum(r["success"] and not r["interrupted"] for r in reports) / len(reports) if reports else None,
             "stable_rate": sum(r["stable"] for r in reports) / len(reports) if reports else None,
             "mean_return": float(np.mean(returns)) if returns else None,
             "std_return": float(np.std(returns)) if returns else None,
             "mean_completion_time_s": float(np.mean(successful_times)) if successful_times else None,
             "completion_time_episodes": len(successful_times)}
+    valid = [r for r in reports if not r["interrupted"]]
+    if valid:
+        result["failure_categories"] = dict(Counter(r.get("diagnostics", {}).get("failure_category", r.get("end_reason")) for r in valid))
+        for name in ("footprint_error_m", "gate_clear_fraction"):
+            values = [r["diagnostics"][name] for r in valid if name in r.get("diagnostics", {})]
+            if values:
+                result[name + "_mean"] = float(np.mean(values))
+        for name in ("object_path_length_m", "control_effort_N2_s", "wall_collision_events", "max_penetration_m"):
+            values = [r["episode_metrics"][name] for r in valid if name in r.get("episode_metrics", {})]
+            if values:
+                result[name + "_mean"] = float(np.mean(values))
+        per_agent = [r["episode_metrics"]["control_effort_N2_s"] / r["num_agents"] for r in valid
+                     if r.get("num_agents") and "control_effort_N2_s" in r.get("episode_metrics", {})]
+        if per_agent:
+            result["control_effort_per_agent_N2_s_mean"] = float(np.mean(per_agent))
+    return result
+
+
+def wilson_interval(successes, episodes):
+    """95% binomial interval; meaningful on a predeclared held-out sample."""
+    if episodes < 1 or not 0 <= successes <= episodes:
+        raise ValueError("invalid binomial sample")
+    z, p = 1.959963984540054, successes / episodes
+    center = (p + z*z / (2*episodes)) / (1 + z*z/episodes)
+    half = z * math.sqrt(p*(1-p)/episodes + z*z/(4*episodes*episodes)) / (1 + z*z/episodes)
+    return max(0., center-half), min(1., center+half)
 
 
 def evaluate_policy(agent, environment_config, episodes=5, seed=100000, deterministic=True,

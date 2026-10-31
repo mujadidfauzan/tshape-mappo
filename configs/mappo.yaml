@@ -22,7 +22,7 @@ normalize_inputs: true
 normalization_clip: 10.0
 # Step thresholds are checked after each PPO update (at rollout boundaries).
 checkpoint_interval_steps: 10000
-eval_interval_steps: 10000
+eval_interval_steps: 50000
 eval_episodes: 5
 eval_seed: 100000
 torch_threads: 1

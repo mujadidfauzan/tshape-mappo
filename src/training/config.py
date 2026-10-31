@@ -37,7 +37,8 @@ class MAPPOConfig:
     normalize_inputs: bool = True
     normalization_clip: float = 10.0
     checkpoint_interval_steps: int = 10000
-    eval_interval_steps: int = 10000
+    eval_interval_steps: int = 50000
+    curriculum: str | None = None
     eval_episodes: int = 5
     eval_seed: int = 100000
     torch_threads: int = 1
@@ -50,6 +51,8 @@ class MAPPOConfig:
     reward_log_interval_steps: int = 100
 
     def __post_init__(self):
+        if self.curriculum is not None and (not isinstance(self.curriculum, str) or not self.curriculum):
+            raise ValueError("curriculum must be a nonempty YAML path or null")
         integer_fields = ("total_steps", "rollout_steps", "ppo_epochs", "num_minibatches",
                           "actor_hidden_size", "critic_hidden_size", "checkpoint_interval_steps",
                           "eval_interval_steps", "eval_episodes", "torch_threads", "stats_window_size")

@@ -1,3 +1,5 @@
+# Independent policies support 2, 4, 8 or 16 agents.
+num_agents: 4
 # M2 Easy baseline. Geometry, mass, damping and motor limits stay in the XML.
 model_path: assets/mujoco/arena.xml
 # 50 substeps x 1 ms keeps the policy interval at 50 ms (20 Hz).

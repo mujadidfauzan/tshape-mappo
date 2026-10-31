@@ -62,7 +62,7 @@ def main():
     torch.set_num_threads(args.torch_threads)
     agent, payload = MAPPO.from_checkpoint(args.checkpoint, args.device)
     training = payload["training"]
-    if training.get("feature_schema") != feature_schema():
+    if training.get("feature_schema") != feature_schema(agent.dimensions["num_agents"]):
         parser.error("checkpoint feature schema does not match this environment")
     completed_reports = []
     metadata = {}
@@ -118,6 +118,8 @@ def main():
             if reset_migrated:
                 say("Using the current near-object reset; this differs from the checkpoint's original task distribution.")
         model_xml = config.resolved_model_path.read_text()
+        from src.envs.model import model_with_agents
+        model_xml = model_with_agents(model_xml, config.num_agents)
         metadata.update(checkpoint=str(args.checkpoint.resolve()),
                       environment_config=config.to_dict(), model_xml=model_xml,
                       model_sha256=hashlib.sha256(model_xml.encode()).hexdigest(),

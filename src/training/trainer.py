@@ -14,23 +14,27 @@ import yaml
 from src.algorithms.mappo import MAPPO
 from src.algorithms.rollout_buffer import RolloutBuffer
 from src.envs.config import load_config, load_checkpoint_config
-from src.envs.observations import ACTOR_FEATURES, STATE_FEATURES
+from src.envs.observations import feature_layout
+from src.envs.model import model_with_agents
 from src.envs.tshape_env import TShapeParallelEnv
 from src.evaluation.evaluator import evaluate_policy
 from .config import load_mappo_config
 from .logging import EpisodeStats, RunLogger
 from .artifacts import write_json, record_evaluation
+from .curriculum import Curriculum
 
 
-def feature_schema():
-    return {"actor": [[name, size] for name, size in ACTOR_FEATURES],
-            "critic": [[name, size] for name, size in STATE_FEATURES]}
+def feature_schema(num_agents=4):
+    actor, critic = feature_layout(num_agents)
+    return {"actor": [[name, size] for name, size in actor],
+            "critic": [[name, size] for name, size in critic]}
 
 
 class Trainer:
     def __init__(self, run_dir, config=None, environment_config=None, resume=None,
                  resume_step_budget=None, resume_video_interval=None, resume_eval_interval=None,
-                 resume_checkpoint_interval=None, resume_tensorboard=None, resume_reward_interval=None):
+                 resume_checkpoint_interval=None, resume_tensorboard=None, resume_reward_interval=None,
+                 init_actor=None):
         cfg = self.config = load_mappo_config(config)
         if cfg.total_episodes is not None:
             raise ValueError("Episode budgets are no longer used; set total_steps/--total-steps instead")
@@ -46,6 +50,10 @@ class Trainer:
         self.agent = None
         self.resume_source = str(Path(resume).resolve()) if resume is not None else None
         self.resume_best_score = None
+        if resume is not None and init_actor is not None:
+            raise ValueError("actor initialization starts a new run; do not combine it with resume")
+        self.actor_initialization_source = str(Path(init_actor).resolve()) if init_actor is not None else None
+        self.curriculum = None
         saved_environment = None
         if resume is None:
             base_env = load_config(environment_config)
@@ -55,7 +63,8 @@ class Trainer:
                 raise ValueError("resume uses the checkpoint environment; do not supply --env-config")
             self.agent, payload = MAPPO.from_checkpoint(resume, device=cfg.device, load_optimizers=True)
             training = payload["training"]
-            if training.get("feature_schema") != feature_schema():
+            self.actor_initialization_source = training.get("actor_initialization_source")
+            if training.get("feature_schema") != feature_schema(self.agent.dimensions["num_agents"]):
                 raise ValueError("checkpoint observation schema does not match this implementation")
             # Budget, device and recording cadence may change on resume.
             previous_cfg = load_mappo_config(payload["mappo_config"])
@@ -99,6 +108,16 @@ class Trainer:
                 raise ValueError("checkpoint XML hash mismatch")
             if self._budget_reached():
                 raise ValueError("training budget must exceed the steps/episodes already in the checkpoint")
+            if training.get("curriculum_definition") is not None:
+                self.curriculum = Curriculum.load(training["curriculum_definition"], training.get("curriculum_state"))
+        if resume is None and cfg.curriculum is not None:
+            self.curriculum = Curriculum.load(cfg.curriculum)
+        if resume is not None and cfg.curriculum is not None and self.curriculum is None:
+            raise ValueError("curriculum checkpoint is missing its saved definition")
+        if self.curriculum:
+            start = self.curriculum.seed
+            if cfg.eval_seed < start + self.curriculum.episodes and cfg.eval_seed + cfg.eval_episodes > start:
+                raise ValueError("curriculum validation seeds must be separate from full-task validation")
         # Read saved markers before migration so old statistics are not reused.
         previous = saved_environment if saved_environment is not None else base_env.to_dict()
         previous_reset_distribution = previous.get("reset_distribution", "legacy")
@@ -107,6 +126,10 @@ class Trainer:
         goal_distribution_changed = base_env.difficulty != "easy" and previous_randomize_goal
         base_env = replace(base_env, reset_distribution="near_object", randomize_reset=True,
                            randomize_goal=previous_randomize_goal if base_env.difficulty == "easy" else False)
+        if base_env.reward_mode == "footprint_potential" and base_env.shaping_gamma != cfg.gamma:
+            raise ValueError("footprint potential shaping_gamma must equal MAPPO gamma")
+        if resume is None:
+            model_xml = model_with_agents(model_xml, base_env.num_agents)
         if self.agent is not None and (reset_distribution_changed or goal_distribution_changed):
             self.agent.obs_normalizer.reset()
             self.agent.state_normalizer.reset()
@@ -119,7 +142,17 @@ class Trainer:
         snapshot = self.run_dir / "arena.xml"
         snapshot.write_text(model_xml)
         self.environment_config = replace(base_env, model_path=str(snapshot))
-        self.env = TShapeParallelEnv(config=self.environment_config)
+        if self.curriculum:
+            self.curriculum.validate_configs(self.environment_config)
+            for index in range(len(self.curriculum.definition["stages"])):
+                probe = TShapeParallelEnv(config=self.curriculum.config(self.environment_config, index))
+                try:
+                    probe.reset(seed=self.curriculum.seed + index)
+                finally:
+                    probe.close()
+            (self.run_dir / "curriculum.yaml").write_text(yaml.safe_dump(self.curriculum.definition))
+        active_config = self.curriculum.config(self.environment_config) if self.curriculum else self.environment_config
+        self.env = TShapeParallelEnv(config=active_config)
         if base_env.difficulty == "hard":
             centers = []
             for prefix in ("obstacle_0", "obstacle_1"):
@@ -136,6 +169,15 @@ class Trainer:
             self.agent = MAPPO(**dimensions, config=cfg)
         elif self.agent.dimensions != dimensions:
             raise ValueError("checkpoint dimensions do not match the environment")
+        if init_actor is not None:
+            source = torch.load(init_actor, map_location="cpu", weights_only=True)
+            if source["dimensions"] != dimensions or source["training"].get("feature_schema") != feature_schema(base_env.num_agents):
+                raise ValueError("actor transfer requires the same agent count and feature schema")
+            previous_cfg = load_mappo_config(source["mappo_config"])
+            if (previous_cfg.normalize_inputs != cfg.normalize_inputs or previous_cfg.normalization_clip != cfg.normalization_clip):
+                raise ValueError("actor transfer requires matching input-normalization settings")
+            self.agent.actor.load_state_dict({k.removeprefix("actor."): v for k,v in source["model"].items() if k.startswith("actor.")})
+            self.agent.obs_normalizer.load_state_dict({k.removeprefix("obs_normalizer."): v for k,v in source["model"].items() if k.startswith("obs_normalizer.")})
         self.next_eval_step = self._next_threshold(cfg.eval_interval_steps)
         self.next_checkpoint_step = self._next_threshold(cfg.checkpoint_interval_steps)
         self.next_video_step = self._next_threshold(cfg.video_interval_steps)
@@ -157,7 +199,10 @@ class Trainer:
             self.software["tensorboard"] = str(version("tensorboard"))
         manifest = {"mappo": cfg.to_dict(), "environment": self.environment_config.to_dict(),
                     "software": self.software, "model_sha256": self.model_hash,
-                    "feature_schema": feature_schema(), "resume_source": self.resume_source,
+                    "feature_schema": feature_schema(base_env.num_agents), "resume_source": self.resume_source,
+                    "actor_initialization_source": self.actor_initialization_source,
+                    "curriculum_definition": self.curriculum.definition if self.curriculum else None,
+                    "curriculum_state": self.curriculum.state_dict() if self.curriculum else None,
                     "previous_run_best_score": self.resume_best_score,
                     "actual_device": str(self.agent.device),
                     "previous_reset_distribution": previous_reset_distribution,
@@ -176,7 +221,11 @@ class Trainer:
             raise ValueError("training retains only best.pt and latest.pt")
         training = {"environment_config": self.environment_config.to_dict(),
                     "model_xml": self.model_xml, "model_sha256": self.model_hash,
-                    "feature_schema": feature_schema(), "software": self.software,
+                    "feature_schema": feature_schema(self.environment_config.num_agents), "software": self.software,
+                    "curriculum_definition": self.curriculum.definition if self.curriculum else None,
+                    "curriculum_state": self.curriculum.state_dict() if self.curriculum else None,
+                    "active_environment_config": self.env.config.to_dict(),
+                    "actor_initialization_source": self.actor_initialization_source,
                     "environment_steps": self.steps, "updates": self.updates,
                     "episode_index": self.episode_index,
                     "completed_episodes": self.completed_episodes,
@@ -214,12 +263,24 @@ class Trainer:
     def episode_seed(self):
         """Skip the fixed validation seed range even during a very long run."""
         cfg = self.config
-        first, last = cfg.eval_seed, cfg.eval_seed + cfg.eval_episodes - 1
         candidate = cfg.seed + self.episode_index
-        if first <= cfg.seed <= last:
-            candidate += last - cfg.seed + 1
-        elif cfg.seed < first <= candidate:
-            candidate += cfg.eval_episodes
+        ranges = [(cfg.eval_seed, cfg.eval_seed + cfg.eval_episodes - 1), (200000, 299999)]
+        curriculum = getattr(self, "curriculum", None)
+        if curriculum:
+            ranges.append((curriculum.seed, curriculum.seed + curriculum.episodes - 1))
+        # Merge overlapping reserved ranges, then map the episode index into
+        # the remaining seed sequence without collisions at either boundary.
+        merged = []
+        for first, last in sorted(ranges):
+            if merged and first <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
+            else:
+                merged.append((first, last))
+        for first, last in merged:
+            if last < cfg.seed:
+                continue
+            if max(first, cfg.seed) <= candidate:
+                candidate += last - max(first, cfg.seed) + 1
         return candidate
 
     def train(self):
@@ -257,6 +318,7 @@ class Trainer:
                             record = {"environment_steps": self.steps, "episode_index": self.episode_index,
                                       "completed_episodes": self.completed_episodes + 1,
                                       "seed": self.episode_seed(), **info}
+                            record["curriculum_stage"] = self.curriculum.name if self.curriculum else None
                             episode_log.write(json.dumps(record, allow_nan=False) + "\n")
                             episode_log.flush()
                             completed.append(info)
@@ -264,6 +326,8 @@ class Trainer:
                             self.logger.scalars("episode", {"return": info["episode_metrics"]["episode_return"],
                                 "length": info["episode_step"], "success": int(info["success"]),
                                 "stable": int(info["stable"])}, self.steps)
+                            self.logger.scalars("contact", {f"agent_{i}_time_s": seconds for i, seconds in
+                                enumerate(info["diagnostics"]["agent_object_contact_time_s"])}, self.steps)
                             self.completed_episodes += 1
                             self.episode_index += 1
                             if self._budget_reached():
@@ -277,6 +341,7 @@ class Trainer:
                     reward_means = {key + "_mean": value / buffer.size for key, value in component_totals.items()}
                     reward_mean = float(np.mean(buffer.rewards[:buffer.size]))
                     record = {"environment_steps": self.steps, "update": self.updates,
+                              "curriculum_stage": self.curriculum.name if self.curriculum else None,
                               "total_completed_episodes": self.completed_episodes,
                               "wall_seconds": elapsed, "fps": speed,
                               "reward_mean_step": reward_mean, "reward_components_mean": reward_means,
@@ -319,6 +384,34 @@ class Trainer:
                     if self.next_video_step is not None and self.steps >= self.next_video_step:
                         self._record_video(self.next_video_step)
                         self.next_video_step = self._next_threshold(cfg.video_interval_steps)
+                    if self.curriculum and self.curriculum.due(self.steps):
+                        stage_name = self.curriculum.name
+                        stage_result = evaluate_policy(agent, env.config, self.curriculum.episodes, self.curriculum.seed)
+                        stage_result.update(environment_steps=self.steps, update=self.updates, stage=stage_name)
+                        promoted = self.curriculum.observe(stage_result["summary"]["success_rate"], self.steps)
+                        stage_result.update(promoted=promoted, curriculum_state=self.curriculum.state_dict())
+                        record_evaluation(self.run_dir, stage_result, kind="curriculum")
+                        self.logger.scalars("curriculum", {"stage_index": self.curriculum.index,
+                            "stage_success_rate": stage_result["summary"]["success_rate"],
+                            "completed": int(self.curriculum.completed)}, self.steps)
+                        print(f"  curriculum stage={stage_name} success={stage_result['summary']['success_rate']:.1%} "
+                              f"next={self.curriculum.name} completed={self.curriculum.completed}", flush=True)
+                        if promoted:
+                            transition = {"environment_steps": self.steps, "from_stage": stage_name,
+                                "to_stage": self.curriculum.name, "discarded_partial_episode_steps": env.steps,
+                                "discarded_seed": self.episode_seed()}
+                            with (self.run_dir / "curriculum_transitions.jsonl").open("a") as stream:
+                                stream.write(json.dumps(transition) + "\n")
+                            if env.steps:
+                                self.episode_index += 1
+                            env.close()
+                            env = self.env = TShapeParallelEnv(config=self.curriculum.config(self.environment_config))
+                            self.episode_stats = EpisodeStats(cfg.stats_window_size)
+                            if not final:
+                                observations, _ = env.reset(seed=self.episode_seed())
+                        # Promotion state must survive even when the normal
+                        # checkpoint threshold has not been crossed yet.
+                        self.checkpoint("latest.pt")
                     if self.steps >= self.next_checkpoint_step or final:
                         self.checkpoint("latest.pt")
                         self.next_checkpoint_step = self._next_threshold(cfg.checkpoint_interval_steps)

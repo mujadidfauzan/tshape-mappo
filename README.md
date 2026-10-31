@@ -8,13 +8,13 @@ Inspired by cooperative geometric puzzle-solving experiments involving ants and 
 
 The primary objective is to investigate **emergent cooperative behavior**, where multiple agents learn to coordinate through physical interactions without explicitly programmed individual roles.
 
-The current implementation supports **Easy, Medium and Hard arenas with four agents and global actor information**. Medium adds one divider; Hard adds two dividers with aligned openings. Agents start at random exterior positions near the object. The obstacle layouts and their target positions are fixed. All three policies use the same observation features and reward. Limited-range observations, variable agent counts, and held-out-layout benchmarks are research extensions. Successful transport alone does not establish emergent coordination.
+The current implementation supports **Easy, Medium and Hard arenas with configurable agent counts and global actor information**. Medium adds one divider; Hard adds two dividers with aligned openings. Agents start at random exterior positions near the object. The obstacle layouts and their target positions are fixed. All three policies use the same observation features and reward. The framework includes task diagnostics, staged curricula, actor transfer, held-out checkpoint benchmarks, and independent agent-count/reward experiments. Limited-range observations and held-out-layout benchmarks remain research extensions. Successful transport alone does not establish emergent coordination.
 
 ---
 
 ## 1. Project Overview
 
-The simulation consists of four circular robotic agents interacting with a passive rigid object inside a bounded arena.
+The default simulation consists of four circular robotic agents interacting with a passive rigid object inside a bounded arena.
 
 Each agent independently applies forces along the X and Y axes. The transported object cannot be directly controlled and must be moved through physical contact between the agents and the object.
 
@@ -100,13 +100,13 @@ The environment supports simultaneous multi-agent actions, cooperative rewards, 
 
 ### Robotic Agents
 
-The environment contains four circular robotic agents.
+The default environment contains four circular robotic agents; `num_agents` in the environment YAML supports 1–16, with experiment matrices for 2, 4, 8 and 16.
 
 Each agent is independently controlled through two force actuators corresponding to the X and Y directions.
 
 | Parameter              | Value         |
 | ---------------------- | ------------- |
-| Number of agents       | 4             |
+| Number of agents       | 4 default; 2/4/8/16 experiments |
 | Agent radius           | 0.03 m        |
 | Agent diameter         | 0.06 m        |
 | Agent mass             | 0.25 kg       |
@@ -180,7 +180,7 @@ With the current symmetric XML actuator limits, $F_{\max}=3\,\mathrm{N}$ per axi
 
 ### Observation Space
 
-Each actor receives **34 float32 features**. Each agent has its own observation vector, with relative positions measured from that agent and vectors expressed along world XY axes:
+With four agents, each actor receives **34 float32 features**. Each agent has its own observation vector, with relative positions measured from that agent and vectors expressed along world XY axes:
 
 | Actor features | Dimensions |
 | --- | ---: |
@@ -194,11 +194,11 @@ Each actor receives **34 float32 features**. Each agent has its own observation 
 | Contact with the object | 1 |
 | Remaining-time fraction and goal-hold fraction | 2 |
 
-The centralized critic receives a separate **33-feature global state** containing object motion, goal geometry, all agent positions/velocities, arena bounds, and episode fractions. Feature order is defined in [observations.py](src/envs/observations.py).
+With four agents, the centralized critic receives a separate **33-feature global state** containing object motion, goal geometry, all agent positions/velocities, arena bounds, and episode fractions. Feature order is defined in [observations.py](src/envs/observations.py).
 
 Actor execution does not call the critic. However, actor information is currently global and has no sensor-range masking. Limited local perception and communication experiments are not implemented yet.
 
-All difficulty levels use exactly these 34 actor and 33 critic features. Medium and Hard have no added obstacle features or internal-wall range sensors. The four wall-clearance features still refer only to the outer arena boundaries. Their fixed dividers must be learned through interaction and the existing world-position information.
+All difficulty levels use the same feature definitions. With N agents, actor size is `18 + 4N` and critic state size is `17 + 4N`; the four-agent schema remains 34/33. Only the lengths of agent/neighbor arrays change; no obstacle features are added. Medium and Hard have no added obstacle features or internal-wall range sensors. The four wall-clearance features still refer only to the outer arena boundaries. Their fixed dividers must be learned through interaction and the existing world-position information.
 
 ### Reward Function
 
@@ -236,7 +236,7 @@ reward = 2 * progress - 0.001 + 20 * success - 20 * physics_failure
 | Success bonus | 20.0 |
 | Physical failure penalty | 20.0 |
 
-All four agents receive the same team reward. Training stores it once per team transition; it is not multiplied by the agent count. Episode return is the sum of these rewards over an episode. A stationary episode has a return near -0.5 for Easy, -1.5 for Medium, or -2.5 for Hard at their full horizons; moving 1 cm closer in one ordinary step gives 0.019.
+All agents receive the same team reward. Training stores it once per team transition; it is not multiplied by the agent count. Episode return is the sum of these rewards over an episode. A stationary episode has a return near -0.5 for Easy, -1.5 for Medium, or -2.5 for Hard at their full horizons; moving 1 cm closer in one ordinary step gives 0.019.
 
 There is currently no reward for an agent merely approaching/touching the object, no energy penalty, and no ordinary collision penalty. Valid pushing contact is necessary. Wall contacts and control effort are logged as diagnostics; a contact triggers the failure penalty only if it leads to a physical safety violation. The existing `wall_collision_events` and `wall_contact_physics_steps` metrics include all internal dividers. See [rewards.py](src/envs/rewards.py) for the implementation.
 
@@ -254,7 +254,7 @@ The goal half-size is `(0.75, 0.65)` m. Its center is randomized for Easy, fixed
 
 ### Random Resets with Agents Near the Object
 
-Every newly started training process, including resume, randomizes object pose and agent positions. All four agents now start **0.04–0.15 m from the object's actual surface**. Easy also randomizes its target; Medium and Hard keep their configured target fixed. No new CLI flag is needed.
+Every newly started training process, including resume, randomizes object pose and agent positions. All agents start **0.04–0.15 m from the object's actual surface**. Easy also randomizes its target; Medium and Hard keep their configured target fixed. No new CLI flag is needed.
 
 | Reset variable | Current distribution |
 | --- | --- |
@@ -267,7 +267,7 @@ Every newly started training process, including resume, randomizes object pose a
 | Agent/agent and internal-wall clearance | At least 0.04 m |
 | Minimum object-to-goal center distance | 1.5 m; already-solved starts are rejected |
 
-The sampler uses exterior faces of the three object boxes. Candidates on hidden internal faces, too close to another agent, or beside a wall are rejected. Each agent can appear on different sides across episodes; the randomized sampler does not assign the four agents fixed slots. Distances refer to the object footprint, not its body center or enclosing rectangle. Object position and orientation remain broadly randomized; the reduced randomization concerns agent placement.
+The sampler uses exterior faces of the three object boxes. Candidates on hidden internal faces, too close to another agent, or beside a wall are rejected. Each agent can appear on different sides across episodes; the randomized sampler does not assign agents fixed pushing slots. Distances refer to the object footprint, not its body center or enclosing rectangle. Object position and orientation remain broadly randomized; the reduced randomization concerns agent placement.
 
 Tune the gap in `agent_spawn_gap: [0.04, 0.15]` in the environment YAML. Its minimum must be at least `spawn_clearance`. Seeded resets reproduce the same object, goal, nearby agents and action-space sampling. Reset/terminal info records the actual initial state and `reset_distribution: near_object`.
 
@@ -297,7 +297,7 @@ The actor receives observations and produces a probability distribution over con
 
 A Gaussian policy is used to sample actions, followed by a `tanh` transformation to keep actions within the allowed range.
 
-The network is `34 -> 128 -> 128 -> 2`, with Tanh hidden activations and a learned, state-independent log standard deviation. The actor stores pre-tanh samples and includes the transformation's log-Jacobian in action likelihoods.
+For four agents the network is `34 -> 128 -> 128 -> 2`, with Tanh hidden activations and a learned, state-independent log standard deviation. The actor stores pre-tanh samples and includes the transformation's log-Jacobian in action likelihoods.
 
 ### Centralized Critic
 
@@ -305,7 +305,7 @@ The centralized critic estimates the expected cumulative reward using global sta
 
 This allows the critic to evaluate the collective state of the environment during training.
 
-The critic is `33 -> 256 -> 256 -> 1`, with Tanh hidden activations and one scalar value per team state.
+For four agents the critic is `33 -> 256 -> 256 -> 1`, with Tanh hidden activations and one scalar value per team state.
 
 ### Generalized Advantage Estimation
 
@@ -319,7 +319,7 @@ $$
 \hat{A}_t = \delta_t + \gamma\lambda(1-T_t)(1-U_t)\hat{A}_{t+1}.
 $$
 
-True termination does not bootstrap. A time limit bootstraps from the final state **before reset**, while advantage accumulation stops at either kind of episode boundary. A rollout cut also uses the next-state value. The same team advantage is used for the four actor samples at that time step. See [gae.py](src/algorithms/gae.py).
+True termination does not bootstrap. A time limit bootstraps from the final state **before reset**, while advantage accumulation stops at either kind of episode boundary. A rollout cut also uses the next-state value. The same team advantage is used for the N actor samples at that time step. See [gae.py](src/algorithms/gae.py).
 
 ### PPO Objective
 
@@ -378,7 +378,7 @@ Defaults come from [mappo.yaml](configs/mappo.yaml), not from guaranteed optimal
 | Entropy coefficient / value coefficient | 0.01 / 0.5 |
 | Maximum gradient norm | 0.5 |
 | Target KL for early stopping | 0.03 |
-| Evaluation interval / episodes | Every 10,000 team steps / 5 episodes |
+| Evaluation interval / episodes | Every 50,000 team steps / 5 episodes |
 | Latest-checkpoint interval | Every 10,000 team steps, at video milestones, and on normal completion |
 | Video interval | Every 100,000 team steps |
 | Rolling episode-statistics window | 100 completed episodes |
@@ -386,7 +386,93 @@ Defaults come from [mappo.yaml](configs/mappo.yaml), not from guaranteed optimal
 
 A rollout of 1,024 team decisions provides 4,096 actor samples and 1,024 team-value samples. Training currently uses one environment process.
 
-Step schedules are checked **after PPO updates**, at rollout boundaries. A threshold of 10,000 is reached at step 10,240 with the default rollout; the 100,000-step video threshold is reached at 100,352. One evaluation/video is produced for the thresholds crossed by an update, rather than repeating identical evaluations if several thresholds were crossed. Final evaluation and checkpoint saving also run when the exact step budget is exhausted.
+Step schedules are checked **after PPO updates**, at rollout boundaries. The 50,000-step evaluation threshold is reached at 50,176 with the default rollout; the 10,000-step checkpoint threshold is reached at 10,240; the 100,000-step video threshold is reached at 100,352. One evaluation/video is produced for the thresholds crossed by an update, rather than repeating identical evaluations if several thresholds were crossed. Final evaluation and checkpoint saving also run when the exact step budget is exhausted.
+
+## Research Workflows
+
+### Task Diagnostics
+
+Episode info/logs include `diagnostics`: signed footprint margin, current/minimum footprint error, inside-but-unsettled steps, center crossings versus complete object clearance at each divider, first complete-clear step, and per-agent contact duration. Contact durations integrate contact flags at every physics substep. They measure contact, not useful mechanical work or emergent coordination.
+
+Terminal failure categories are `gate_not_reached`, `gate_blocked`, `contact_lost`, `goal_footprint_outside`, `goal_not_settled`, or `physics_failure`; success is reported separately. Gate blockage takes precedence when a divider remains uncleared, while `contact_lost_at_end` retains the secondary contact information. Geometric fields on a physics failure retain the last stable geometry; `failure_details` retains the actual failing state.
+
+These measurements do not enter actor/critic inputs or change the baseline reward. TensorBoard adds `rollout/footprint_error_m_mean`, `rollout/footprint_margin_m_mean`, `rollout/gate_clear_fraction_mean`, failure-category rates, and `contact/agent_<i>_time_s` at episode completion.
+
+### Curriculum Training
+
+```bash
+python scripts/train.py --env-config configs/environment.yaml --curriculum configs/curricula/easy.yaml --device cuda --total-steps 2000000 --run-dir results/easy_curriculum
+```
+
+Each curriculum has three stages:
+
+| Arena | Stage 1 | Stage 2 | Final stage |
+| --- | --- | --- | --- |
+| Easy | Goal distance 0.8–1.2 m, yaw ±0.15 rad, 250-step horizon | Distance 1.2–2.0 m, yaw ±0.75 rad, 400-step horizon | Original full task |
+| Medium | Initial yaw 1.42–1.72 rad, fixed target `(1.8, 0)`, horizon 800 | Full yaw, same centerline target, horizon 1,200 | Original target `(1.8, 1.5)` and horizon 1,500 |
+| Hard | Initial yaw 1.42–1.72 rad, fixed target `(3.25, 0)`, horizon 1,500 | Full yaw, same centerline target, horizon 2,000 | Original target `(3.25, 1.5)` and horizon 2,500 |
+
+Agent positions remain random near the object at every stage. Success still requires full containment and settling. Definitions live in `configs/curricula/`; the same bounded pose sampler handles every stage. No scripted action or waypoint controller is used by the learner.
+
+Every 50,000 team steps, a separate stage-validation pool of 20 seeds starting at 150000 is evaluated. Promotion requires at least 70% success on two consecutive checks and 50,000 steps in that stage. These are configurable engineering thresholds, not evidence that a policy has generalized. The final stage restores the complete baseline task; satisfying its threshold marks the curriculum complete and stops extra stage checks.
+
+Full-task evaluation (`eval_seed=100000`, five seeds by default), `best.pt` selection, and videos always use the full final task, even during an easier stage. Stage reports are appended to `evaluations.jsonl` as `kind: curriculum`; they never overwrite the full-task latest/best evaluation snapshots. Curriculum checks add simulation cost in addition to normal monitoring.
+
+Stage switches occur after PPO updates. A partial episode is discarded and its seed/step count recorded in `curriculum_transitions.jsonl`; it is not counted as a completed episode or a failure. The rolling episode window clears at a switch. Curriculum definitions, active stage, streak, start step and completion state are checkpointed. Resume uses the saved definition even if the original YAML path is unavailable. No stage is forced merely because the step budget ends.
+
+### Actor Transfer Between Arenas
+
+After verifying an Easy policy on the full task:
+
+```bash
+python scripts/train.py --env-config configs/environment_medium.yaml --curriculum configs/curricula/medium.yaml --init-actor results/easy_curriculum/checkpoints/best.pt --device cuda --total-steps 2000000 --run-dir results/medium_curriculum_transfer
+```
+
+`--init-actor` starts a new experiment and copies actor weights **and actor input-normalization statistics**, preserving its initial input mapping. The critic, critic normalization, both optimizers, counters and RNG are new. Transfer requires the same agent count, feature schema, actor architecture and normalization settings. Different agent counts are trained independently. `--init-actor` cannot be combined with `--resume`; resume restores the original task, stage and optimizers.
+
+### Held-Out Best/Latest Benchmark
+
+```bash
+python scripts/benchmark.py results/easy_curriculum/checkpoints/best.pt results/easy_curriculum/checkpoints/latest.pt --episodes 50 --device auto --output results/easy_curriculum_benchmark
+```
+
+Both deterministic and stochastic modes run on the same seeds starting at 200000. Updated training excludes `[200000, 300000)` from its episode-seed sequence, along with full-task and curriculum validation pools. The benchmark rejects overlap with saved validation pools. An old checkpoint may have trained on other seed schedules; verify its provenance before calling its results held-out.
+
+Output is bounded to a manifest, `episodes.jsonl`, `summary.csv`, and `summary_by_group.csv`. Per-policy success intervals use the 95% Wilson binomial formula. Group summaries report mean and sample standard deviation across policies, with the number of unique training seeds explicitly shown; one policy has no between-seed standard deviation. Grouping separates task/configuration, training protocol, reward, agent count, mode and best/latest. A confidence interval on a checkpoint selected using five repeated validation seeds is not a generalization estimate.
+
+The benchmark uses full saved task settings; `--env-config` explicitly evaluates an alternative task. It does not record videos by default. Use `scripts/evaluate.py` for selected recordings.
+
+### Agent-Count Experiments
+
+```bash
+python scripts/run_experiments.py configs/experiments/agent_count.yaml --output results/agent_count --dry-run
+python scripts/run_experiments.py configs/experiments/agent_count.yaml --output results/agent_count --device cuda
+```
+
+The matrix declares 2, 4, 8 and 16 agents, five training seeds (11, 22, 33, 44, 55), and 2 million team steps per policy: **20 independent runs / 40 million team steps**. The launcher runs them sequentially, records status and best validation scores in one `experiments.csv`, and stores one normal run directory per policy. `--job-index` selects one zero-based matrix entry; `--total-steps` overrides the budget equally for selected jobs. `--dry-run` prints the matrix and total budget without starting training.
+
+`agent_count.yaml` uses the full Medium task without curriculum to isolate the agent-count setting. `agent_count_curriculum.yaml` is a separate protocol with Medium curriculum. Each is evaluated on the same full final task. Model XML is generated automatically and saved self-contained in each run/checkpoint. No XML file per agent count is needed.
+
+| Agents | Actor input | Critic input | Maximum summed actuator force per axis |
+| --- | ---: | ---: | ---: |
+| 2 | 26 | 25 | 6 N |
+| 4 | 34 | 33 | 12 N |
+| 8 | 50 | 49 | 24 N |
+| 16 | 82 | 81 | 48 N |
+
+Per-agent radius, mass and force limits and the object's physics remain fixed. More agents increase total available force/mass, collision constraints, actor samples per team step, and network input size. Improvements therefore do not isolate coordination efficiency by themselves. Report these factors, use equal team-step budgets and multiple seeds, and keep success, mechanical efficiency and coordination claims separate. The privileged scripted diagnostic remains four-agent only.
+
+### Reward Ablation
+
+The default remains `reward_mode: baseline`. `footprint_potential` replaces only the progress term with potential shaping: `Phi=-footprint_error` and `F=gamma*Phi(next)-Phi(current)`. Footprint error is the minimum translation needed to fit the oriented shape into the goal, with a positive deficit if its span cannot fit. It is zero exactly when the complete object fits; no target yaw or maneuver sequence is prescribed.
+
+True terminal states (success/physics failure) have zero next potential. Time-limit truncations retain their next potential, matching GAE continuation bootstrapping. Set `shaping_gamma` equal to MAPPO `gamma`; the trainer rejects a mismatch. Success, time and failure weights remain unchanged. Raw episode returns across the two reward modes are not comparable measures of task quality; compare success and physical metrics.
+
+```bash
+python scripts/run_experiments.py configs/experiments/reward_ablation.yaml --output results/reward_ablation --dry-run
+```
+
+This declares both rewards with the same Easy curriculum, four agents, equal budgets and five seeds. The implementation has pipeline/geometry tests; learned improvements still require running the experiments.
 
 ## 6. Installation
 
@@ -519,10 +605,10 @@ python scripts/train.py --config configs/mappo.yaml --env-config configs/environ
 For a longer GPU run with an explicit step budget and independent schedules:
 
 ```bash
-python scripts/train.py --device cuda --total-steps 2000000 --eval-interval-steps 10000 --video-interval-steps 100000 --run-dir results/mappo_video
+python scripts/train.py --device cuda --total-steps 2000000 --eval-interval-steps 50000 --video-interval-steps 100000 --run-dir results/mappo_video
 ```
 
-`--total-steps` (alias `--total-timesteps`) is the cumulative number of **team environment decisions**. One simultaneous action from all four agents counts as one timestep and produces one shared reward. It is not four timesteps or 50 physics substeps. The trainer stops at the requested budget, including a shorter final rollout when needed. Episode count remains a performance statistic; `--total-episodes` is no longer a supported training flag.
+`--total-steps` (alias `--total-timesteps`) is the cumulative number of **team environment decisions**. One simultaneous action from all N agents counts as one timestep and produces one shared reward. It is not four timesteps or 50 physics substeps. The trainer stops at the requested budget, including a shorter final rollout when needed. Episode count remains a performance statistic; `--total-episodes` is no longer a supported training flag.
 
 With full 500-step episodes, 100,000 timesteps complete 200 episodes. Success or physical failure can shorten episodes, so the episode count is not a fixed training budget. A step budget still does not guarantee convergence.
 
@@ -536,7 +622,7 @@ python scripts/train.py \
   --run-dir results/mappo_medium
 ```
 
-Use `--device cpu` on a machine without CUDA. This starts a new policy with the existing MAPPO settings, TensorBoard logging, evaluation every 10,000 steps, 1080p video every 100,000 steps, and only `best.pt`/`latest.pt` checkpoints. Schedules are checked at rollout boundaries as described above. Two million steps is an initial experimental budget, not a success guarantee.
+Use `--device cpu` on a machine without CUDA. This starts a new policy with the existing MAPPO settings, TensorBoard logging, evaluation every 50,000 steps, 1080p video every 100,000 steps, and only `best.pt`/`latest.pt` checkpoints. Schedules are checked at rollout boundaries as described above. Two million steps is an initial experimental budget, not a success guarantee.
 
 To resume Medium, use its own checkpoint and a new run directory. An Easy resume restores the Easy task; `--env-config` cannot switch the task of a resumed run.
 
@@ -591,7 +677,7 @@ python scripts/train.py --resume results/mappo_baseline/checkpoints/latest.pt --
 To continue a legacy run that used an episode budget, explicitly replace its budget with a cumulative step target:
 
 ```bash
-python scripts/train.py --resume results/mappo_video/checkpoints/latest.pt --total-steps 2000000 --eval-interval-steps 10000 --video-interval-steps 100000 --device cuda --run-dir results/mappo_video_resume
+python scripts/train.py --resume results/mappo_video/checkpoints/latest.pt --total-steps 2000000 --eval-interval-steps 50000 --video-interval-steps 100000 --device cuda --run-dir results/mappo_video_resume
 ```
 
 The target must exceed the saved timestep count; it includes prior training rather than adding that many new steps. For example, resuming from 1,350,000 steps with a 2,000,000-step target collects 650,000 additional steps. A legacy episode-budget checkpoint requires an explicit `--total-steps` to avoid carrying over an unintended budget. Legacy YAML with `total_episodes` also requires an explicit step override.
@@ -730,7 +816,7 @@ The main research questions include:
 - How do observation availability and environmental constraints affect cooperation?
 - Can learned cooperative strategies generalize to different object configurations and obstacle layouts?
 
-Experiments with other agent counts, limited-range sensors, communication, more complex or randomized obstacle layouts, curricula, energy/collision reward ablations, and held-out layouts require additional implementation. The fixed Medium and Hard environments are implemented; learned success on them still needs to be demonstrated. Systematic results require multiple independent training seeds and an explicit evaluation protocol.
+Limited-range sensors, communication, randomized obstacle layouts, energy/collision reward ablations, and held-out layouts require additional implementation. Agent-count matrices, staged reset curricula and the footprint-potential reward ablation are implemented. The fixed Medium and Hard environments are implemented; learned success on them still needs to be demonstrated. Systematic results require multiple independent training seeds and an explicit evaluation protocol.
 
 ## 9. References
 

@@ -30,8 +30,8 @@ def write_json(path, payload):
 
 def record_evaluation(run_dir, payload, *, kind="evaluation", best=False):
     """Append the complete report; replace only the latest/best periodic snapshots."""
-    if kind not in ("evaluation", "video"):
-        raise ValueError("evaluation kind must be evaluation or video")
+    if kind not in ("evaluation", "video", "curriculum"):
+        raise ValueError("evaluation kind must be evaluation, video or curriculum")
     record = {**payload, "kind": kind}
     line = json.dumps(record, allow_nan=False) + "\n"
     root = Path(run_dir)
@@ -61,7 +61,7 @@ def read_evaluations(run_dir, *, include_videos=False):
         for line in history.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 record = json.loads(line)
-                if record.get("kind") not in ("evaluation", "video"):
+                if record.get("kind") not in ("evaluation", "video", "curriculum"):
                     raise ValueError(f"invalid evaluation kind in {history}")
                 records.append(record)
     for path, kind in _legacy_sources(root):

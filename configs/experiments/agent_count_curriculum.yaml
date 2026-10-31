@@ -1,0 +1,7 @@
+environment_config: configs/environment_medium.yaml
+mappo_config: configs/mappo.yaml
+curriculum: configs/curricula/medium.yaml
+num_agents: [2, 4, 8, 16]
+seeds: [11, 22, 33, 44, 55]
+reward_modes: [baseline]
+total_steps: 2000000

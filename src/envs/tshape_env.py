@@ -9,7 +9,8 @@ from gymnasium.utils import seeding
 from pettingzoo import ParallelEnv
 
 from .config import load_config
-from .observations import OBSERVATION_SIZE, STATE_SIZE, build_observations, build_state
+from .observations import feature_layout, build_observations, build_state
+from .diagnostics import EpisodeDiagnostics
 from .physics import TShapePhysics, finite_array
 from .rewards import team_reward
 from .termination import goal_is_settled, object_inside_goal
@@ -23,7 +24,7 @@ class TShapeParallelEnv(ParallelEnv):
         if render_mode not in (None, "human"):
             raise ValueError("render_mode must be None or 'human'")
         self.config = cfg = load_config(config, max_steps=max_steps, frame_skip=frame_skip)
-        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path)
+        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path, cfg.num_agents)
         self._rooms = (self.physics.transport_room_bounds(cfg.difficulty)
                        if cfg.difficulty != "easy" else None)
         if cfg.difficulty == "easy" and self.physics.obstacle_ids:
@@ -62,8 +63,9 @@ class TShapeParallelEnv(ParallelEnv):
         self.viewer = None
         self.metadata = {**type(self).metadata, "name": f"tshape_{cfg.difficulty}_v1",
                          "render_fps": max(1, round(1 / self.physics.control_dt))}
-        self.obs_dim = OBSERVATION_SIZE
-        self.state_space = spaces.Box(-np.inf, np.inf, shape=(STATE_SIZE,), dtype=np.float32)
+        actor_features, state_features = feature_layout(cfg.num_agents)
+        self.obs_dim = sum(size for _, size in actor_features)
+        self.state_space = spaces.Box(-np.inf, np.inf, shape=(sum(size for _, size in state_features),), dtype=np.float32)
         self._action_spaces = {name: spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
                                for name in self.possible_agents}
         self._observation_spaces = {name: spaces.Box(-np.inf, np.inf, shape=(self.obs_dim,), dtype=np.float32)
@@ -120,6 +122,15 @@ class TShapeParallelEnv(ParallelEnv):
         p = self.physics
         if randomize:
             return self._sample_near_object_agents()
+        if p.num_agents != 4:
+            # Deterministic diagnostics use a private seeded sampler. Restore
+            # the caller's RNG; no slots or geometry need to be duplicated.
+            previous = self.np_random
+            try:
+                self.np_random = np.random.default_rng(0)
+                return self._sample_near_object_agents()
+            finally:
+                self.np_random = previous
         top = p.model.geom("t_horizontal")
         stem = p.model.geom("t_vertical")
         gap = self.config.spawn_clearance
@@ -172,7 +183,7 @@ class TShapeParallelEnv(ParallelEnv):
 
     def _sample_object_pose(self, room=None):
         p = self.physics
-        yaw = self.np_random.uniform(-np.pi, np.pi)
+        yaw = self.np_random.uniform(*self.config.object_yaw_range)
         c, s = np.cos(yaw), np.sin(yaw)
         corners = self._object_local_corners @ np.array([[c, s], [-s, c]])
         bounds = (p.lower, p.upper) if room is None else self._rooms[room]
@@ -180,6 +191,12 @@ class TShapeParallelEnv(ParallelEnv):
         upper = bounds[1] - self.config.arena_spawn_margin - corners.max(axis=0)
         if np.any(lower > upper):
             raise ValueError("transported object cannot fit within the arena spawn margin")
+        if self.config.object_goal_distance_range is not None:
+            low, high = self.config.object_goal_distance_range
+            angle = self.np_random.uniform(-np.pi, np.pi)
+            radius = np.sqrt(self.np_random.uniform(low*low, high*high))
+            position = self.goal_center + radius * np.array([np.cos(angle), np.sin(angle)])
+            return np.r_[position, yaw] if np.all(position >= lower) and np.all(position <= upper) else None
         return np.r_[self.np_random.uniform(lower, upper), yaw]
 
     def _sample_goal(self):
@@ -212,7 +229,7 @@ class TShapeParallelEnv(ParallelEnv):
         if explicit_pose is not None:
             explicit_pose = finite_array(explicit_pose, (3,), "object_pose")
         if explicit_agents is not None:
-            explicit_agents = finite_array(explicit_agents, (4, 2), "agent_positions")
+            explicit_agents = finite_array(explicit_agents, (self.config.num_agents, 2), "agent_positions")
         self._has_reset = False
         self.agents = []
         lock = self.viewer.lock() if self.viewer is not None else nullcontext()
@@ -227,6 +244,8 @@ class TShapeParallelEnv(ParallelEnv):
                     pose = self._sample_object_pose(self._start_room)
                 else:
                     pose = np.r_[self.physics.model.body_pos[self.physics.object_body, :2], 0.0]
+                if pose is None:
+                    continue
                 # Synchronize object geometry before sampling nearby agent surfaces.
                 # No physics step occurs with the provisional XML agent positions.
                 self.physics.reset(pose)
@@ -256,6 +275,7 @@ class TShapeParallelEnv(ParallelEnv):
             self._last_observations = None
             self._physics_failed = False
             self._failure_details = None
+            self._episode_diagnostics = EpisodeDiagnostics(self.physics, self.goal_center, self.goal_half_size)
             positions, _ = self.physics.get_agents_state()
             obj = self.physics.get_object_state()
             self._initial_state = {"goal_center": self.goal_center.tolist(),
@@ -263,6 +283,7 @@ class TShapeParallelEnv(ParallelEnv):
                 "agent_positions": positions.tolist(), "reset_distribution": self.config.reset_distribution,
                 "randomized": randomize, "goal_randomized": bool(randomize and self.config.randomize_goal),
                 "difficulty": self.config.difficulty}
+            self._initial_state["num_agents"] = self.config.num_agents
             observations = self._observations()
             self._last_observations = {name: obs.copy() for name, obs in observations.items()}
             self._last_state = self.state()
@@ -277,6 +298,7 @@ class TShapeParallelEnv(ParallelEnv):
         return {**info, "reward_components": info["reward_components"].copy(),
                 "failure_details": deepcopy(info["failure_details"]),
                 "initial_state": deepcopy(info.get("initial_state")),
+                "diagnostics": deepcopy(info["diagnostics"]),
                 "episode_metrics": info["episode_metrics"].copy()}
 
     def _info(self, success, stable, progress, components, end_reason, failure_reason):
@@ -286,6 +308,8 @@ class TShapeParallelEnv(ParallelEnv):
         elapsed = float(self.physics.data.time) if np.isfinite(self.physics.data.time) else None
         return {"success": bool(success), "stable": bool(stable), "distance_to_goal": distance,
                 "difficulty": self.config.difficulty,
+                "num_agents": self.config.num_agents,
+                "diagnostics": self._episode_diagnostics.report(success, stable, end_reason is not None),
                 "progress": float(progress), "episode_step": self.steps,
                 "elapsed_time_s": elapsed, "completion_time_s": elapsed if success else None,
                 "goal_hold_steps": self.goal_hold_count, "end_reason": end_reason,
@@ -303,8 +327,9 @@ class TShapeParallelEnv(ParallelEnv):
         current_agents = self.agents.copy()
         if set(actions) != set(current_agents):
             raise ValueError("actions must be provided for all and only live agents")
-        action_array = finite_array([actions[name] for name in current_agents], (4, 2), "actions")
+        action_array = finite_array([actions[name] for name in current_agents], (self.config.num_agents, 2), "actions")
         previous_distance = self._distance_to_goal() if self._finite_physics() else 0.0
+        previous_error = self._episode_diagnostics.error
         with self.viewer.lock() if self.viewer is not None else nullcontext():
             report = self.physics.step(
                 action_array, max_penetration=self.config.max_penetration,
@@ -315,6 +340,13 @@ class TShapeParallelEnv(ParallelEnv):
             stable = report["stable"]
             self._failure_details = report["failure_details"]
             self._physics_failed = not stable
+            if stable:
+                settled = goal_is_settled(self.physics, self.goal_center, self.goal_half_size,
+                                         self.config.success_linear_speed, self.config.success_angular_speed)
+                self._episode_diagnostics.update(self.physics, self.steps, self.object_inside_goal(), settled,
+                                                report["agent_object_contact_time_s"])
+            else:
+                self._episode_diagnostics.contact_time += report["agent_object_contact_time_s"]
             if stable and goal_is_settled(self.physics, self.goal_center, self.goal_half_size,
                                           self.config.success_linear_speed, self.config.success_angular_speed):
                 self.goal_hold_count += 1
@@ -325,7 +357,7 @@ class TShapeParallelEnv(ParallelEnv):
             truncated = self.steps >= self.max_steps and not terminated
             distance = self._distance_to_goal() if self._finite_physics() else previous_distance
             reward, progress, components = team_reward(previous_distance, distance, success,
-                                                       not stable, self.config)
+                not stable, self.config, previous_error, self._episode_diagnostics.error)
             self._metrics["episode_return"] += reward
             for key in ("object_path_length_m", "control_effort_N2_s", "wall_collision_events",
                         "wall_contact_physics_steps"):

@@ -24,6 +24,14 @@ OBSERVATION_SIZE = sum(size for _, size in ACTOR_FEATURES)
 STATE_SIZE = sum(size for _, size in STATE_FEATURES)
 
 
+def feature_layout(num_agents=4):
+    actor = tuple((name, 2*(num_agents-1) if name in ("other_relative_positions", "other_velocities") else size)
+                  for name, size in ACTOR_FEATURES)
+    critic = tuple((name, 2*num_agents if name in ("agent_positions", "agent_velocities") else size)
+                   for name, size in STATE_FEATURES)
+    return actor, critic
+
+
 def build_state(physics, goal_center, goal_half_size, remaining_time, goal_hold):
     obj = physics.get_object_state()
     positions, velocities = physics.get_agents_state()
@@ -41,7 +49,7 @@ def build_observations(physics, goal_center, goal_half_size, remaining_time, goa
     contacts, _, _ = physics.contact_state()
     result = {}
     for i, name in enumerate(physics.agent_names):
-        others = [j for j in range(4) if j != i]
+        others = [j for j in range(physics.num_agents) if j != i]
         wall_clearances = np.r_[positions[i] - physics.lower - physics.radii[i],
                                 physics.upper - positions[i] - physics.radii[i]]
         result[name] = np.concatenate([

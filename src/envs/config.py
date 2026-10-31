@@ -1,8 +1,9 @@
-"""Validated, serializable configuration for four-agent transport tasks."""
+"""Validated, serializable configuration for cooperative transport tasks."""
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
+from numbers import Real
 
 import numpy as np
 import yaml
@@ -13,6 +14,7 @@ DEFAULT_CONFIG_PATH = ROOT / "configs" / "environment.yaml"
 
 @dataclass(frozen=True)
 class EnvironmentConfig:
+    num_agents: int = 4
     difficulty: str = "easy"
     model_path: str = "assets/mujoco/arena.xml"
     frame_skip: int = 50
@@ -31,6 +33,10 @@ class EnvironmentConfig:
     agent_spawn_gap: tuple = (0.04, 0.15)
     spawn_clearance: float = 0.04
     reset_attempts: int = 100
+    object_yaw_range: tuple = (-np.pi, np.pi)
+    object_goal_distance_range: tuple | None = None
+    reward_mode: str = "baseline"
+    shaping_gamma: float = 0.99
     progress_weight: float = 2.0
     success_reward: float = 20.0
     time_penalty: float = 0.001
@@ -48,16 +54,25 @@ class EnvironmentConfig:
             raise ValueError("randomize_goal must be a boolean")
         if self.difficulty != "easy" and self.randomize_goal:
             raise ValueError("Medium and Hard require a fixed target")
-        for name in ("frame_skip", "max_steps", "success_hold_steps", "reset_attempts"):
+        for name in ("num_agents", "frame_skip", "max_steps", "success_hold_steps", "reset_attempts"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
             object.__setattr__(self, name, int(value))
+        if self.num_agents > 16:
+            raise ValueError("num_agents must be between 1 and 16 for the validated arena sizes")
+        if self.reward_mode not in ("baseline", "footprint_potential"):
+            raise ValueError("reward_mode must be baseline or footprint_potential")
+        if (isinstance(self.shaping_gamma, bool) or not isinstance(self.shaping_gamma, Real)
+                or not np.isfinite(self.shaping_gamma) or not 0 <= self.shaping_gamma <= 1):
+            raise ValueError("shaping_gamma must lie in [0, 1]")
         if not isinstance(self.randomize_reset, bool):
             raise ValueError("randomize_reset must be a boolean")
         if self.reset_distribution != "near_object":
             raise ValueError("reset_distribution must be near_object; obsolete reset modes were removed")
-        for name in ("goal_center", "goal_half_size", "agent_spawn_gap"):
+        for name in ("goal_center", "goal_half_size", "agent_spawn_gap", "object_yaw_range", "object_goal_distance_range"):
+            if name == "object_goal_distance_range" and self.object_goal_distance_range is None:
+                continue
             value = np.asarray(getattr(self, name), dtype=np.float64)
             if value.shape != (2,) or not np.isfinite(value).all():
                 raise ValueError(f"{name} must contain two finite numbers")
@@ -65,6 +80,10 @@ class EnvironmentConfig:
                 raise ValueError("goal_half_size must be positive")
             if name == "agent_spawn_gap" and (value[0] < 0 or value[1] < value[0]):
                 raise ValueError("agent_spawn_gap must be an ordered nonnegative [minimum, maximum]")
+            if name in ("object_yaw_range", "object_goal_distance_range") and value[0] > value[1]:
+                raise ValueError(f"{name} must be ordered")
+            if name == "object_goal_distance_range" and value[0] <= 0:
+                raise ValueError("object_goal_distance_range must be positive")
             object.__setattr__(self, name, tuple(float(x) for x in value))
         scalar_names = (
             "success_linear_speed", "success_angular_speed", "spawn_clearance", "progress_weight",
@@ -79,6 +98,8 @@ class EnvironmentConfig:
             object.__setattr__(self, name, value)
         if self.agent_spawn_gap[0] < self.spawn_clearance:
             raise ValueError("agent_spawn_gap minimum must be at least spawn_clearance")
+        if self.object_goal_distance_range is not None and self.minimum_goal_distance > self.object_goal_distance_range[0]:
+            raise ValueError("minimum_goal_distance cannot exceed the curriculum distance band's minimum")
         if self.max_linear_speed <= 0 or self.max_angular_speed <= 0:
             raise ValueError("safety speed limits must be positive")
         if not isinstance(self.model_path, str) or not self.model_path:

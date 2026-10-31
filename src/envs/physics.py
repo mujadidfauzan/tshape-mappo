@@ -5,6 +5,7 @@ import re
 
 import mujoco
 import numpy as np
+from .model import model_with_agents
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "assets" / "mujoco" / "arena.xml"
@@ -18,19 +19,23 @@ def finite_array(value, shape, name):
 
 
 class TShapePhysics:
-    def __init__(self, frame_skip=50, model_path=MODEL_PATH):
+    def __init__(self, frame_skip=50, model_path=MODEL_PATH, num_agents=None):
         if isinstance(frame_skip, bool) or not isinstance(frame_skip, (int, np.integer)) or frame_skip < 1:
             raise ValueError("frame_skip must be a positive integer")
         self.model_path = Path(model_path).resolve()
-        self.model = m = mujoco.MjModel.from_xml_path(str(self.model_path))
+        xml = self.model_path.read_text()
+        self.model_xml = model_with_agents(xml, num_agents) if num_agents is not None else xml
+        self.model = m = mujoco.MjModel.from_xml_string(self.model_xml)
         self.data = mujoco.MjData(m)
         self.frame_skip = int(frame_skip)
-        self.agent_names = sorted(
+        self.agent_names = sorted([
             m.body(i).name for i in range(m.nbody)
             if re.fullmatch(r"agent_\d+", m.body(i).name)
+            ], key=lambda name: int(name.split("_")[1])
         )
-        if self.agent_names != [f"agent_{i}" for i in range(4)]:
-            raise ValueError("Transport tasks require exactly agent_0 through agent_3")
+        self.num_agents = n = len(self.agent_names)
+        if not n or self.agent_names != [f"agent_{i}" for i in range(n)]:
+            raise ValueError("Agent names must be contiguous starting at agent_0")
         self.agent_bodies = np.array([m.body(n).id for n in self.agent_names])
         self.agent_geom_ids = np.array([m.geom(f"{n}_geom").id for n in self.agent_names])
         self.agent_geoms = set(self.agent_geom_ids.tolist())
@@ -40,8 +45,8 @@ class TShapePhysics:
         self.agent_qpos = m.jnt_qposadr[joints]
         self.motor_ids = np.array([[m.actuator(f"{n}_f{axis}").id for axis in ("x", "y")]
                                    for n in self.agent_names])
-        if m.nu != 8 or m.nq != 11 or m.nv != 11:
-            raise ValueError("Expected 8 agent motors and 11 planar degrees of freedom")
+        if m.nu != 2*n or m.nq != 2*n+3 or m.nv != 2*n+3:
+            raise ValueError("Expected two motors/slide joints per agent and three object DOFs")
         if not np.array_equal(m.actuator_trnid[self.motor_ids, 0], joints):
             raise ValueError("Motor names must match their agent slide joints")
         if not np.all(m.actuator_ctrllimited[self.motor_ids]):
@@ -94,7 +99,7 @@ class TShapePhysics:
         if object_pose is not None:
             object_pose = finite_array(object_pose, (3,), "object_pose")
         if agent_positions is not None:
-            agent_positions = finite_array(agent_positions, (4, 2), "agent_positions")
+            agent_positions = finite_array(agent_positions, (self.num_agents, 2), "agent_positions")
         m, d = self.model, self.data
         mujoco.mj_resetData(m, d)
         if object_pose is not None:
@@ -147,7 +152,7 @@ class TShapePhysics:
                          np.max(centers + extents - self.upper)))
 
     def contact_state(self):
-        flags = np.zeros(4, dtype=bool)
+        flags = np.zeros(self.num_agents, dtype=bool)
         wall_pairs = set()
         penetration = 0.0
         for index in range(self.data.ncon):
@@ -239,7 +244,7 @@ class TShapePhysics:
         if (np.any(positions - self.radii[:, None] < self.lower + clearance)
                 or np.any(positions + self.radii[:, None] > self.upper - clearance)):
             return False
-        for i in range(4):
+        for i in range(self.num_agents):
             if not self.agent_spawn_is_valid(positions[i], i, positions[:i], clearance):
                 return False
         return not self.data.ncon
@@ -332,13 +337,14 @@ class TShapePhysics:
         return tuple(rooms)
 
     def step(self, actions, **safety_limits):
-        actions = np.clip(finite_array(actions, (4, 2), "actions"), -1.0, 1.0)
+        actions = np.clip(finite_array(actions, (self.num_agents, 2), "actions"), -1.0, 1.0)
         low, high = self.motor_limits[..., 0], self.motor_limits[..., 1]
         self.data.ctrl[self.motor_ids] = np.where(actions >= 0, actions * high, -actions * low)
         report = {"stable": True, "failure_reason": None, "physics_steps": 0,
                   "object_path_length_m": 0.0, "control_effort_N2_s": 0.0,
                   "wall_collision_events": 0, "wall_contact_physics_steps": 0,
                   "max_penetration_m": 0.0, "failure_details": None}
+        report["agent_object_contact_time_s"] = np.zeros(self.num_agents)
         check = self.diagnostics(**safety_limits)
         if not check["stable"]:
             report.update(stable=False, failure_reason=check["failure_reason"],
@@ -363,7 +369,8 @@ class TShapePhysics:
             position = self.get_object_state()["position"]
             report["object_path_length_m"] += float(np.linalg.norm(position - previous_position))
             previous_position = position
-            _, pairs, _ = self.contact_state()
+            flags, pairs, _ = self.contact_state()
+            report["agent_object_contact_time_s"] += flags * self.model.opt.timestep
             report["wall_collision_events"] += len(pairs - self._previous_wall_pairs)
             report["wall_contact_physics_steps"] += int(bool(pairs))
             self._previous_wall_pairs = pairs

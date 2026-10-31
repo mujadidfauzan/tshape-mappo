@@ -1,3 +1,5 @@
+# Independent policies support 2, 4, 8 or 16 agents.
+num_agents: 4
 # Fixed two-room Medium arena. Actor observations and reward match Easy.
 # Fixed goal in the right room; random object starts in the left room.
 # Agents start at random exterior positions near the object.

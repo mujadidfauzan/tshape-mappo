@@ -11,7 +11,7 @@ class MAPPOConfigTests(unittest.TestCase):
         self.assertEqual(config.num_minibatches, 1)
         self.assertEqual(config.gamma, 0.99)
         self.assertEqual(config.video_interval_steps, 100000)
-        self.assertEqual(config.eval_interval_steps, 10000)
+        self.assertEqual(config.eval_interval_steps, 50000)
         self.assertTrue(config.tensorboard)
         self.assertEqual((config.video_width, config.video_height), (1920, 1080))
 

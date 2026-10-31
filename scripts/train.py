@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--seed", type=int)
     parser.add_argument("--device", choices=["cpu", "auto", "cuda"])
     parser.add_argument("--resume", type=Path, help="restore training; starts a new episode and output directory")
+    parser.add_argument("--curriculum", type=Path, help="curriculum YAML for a new run")
+    parser.add_argument("--init-actor", type=Path, help="initialize actor/input statistics; fresh critic and optimizers")
     args = parser.parse_args()
     config = load_mappo_config(args.config)
     if args.total_steps is not None:
@@ -38,10 +40,13 @@ def main():
                                checkpoint_interval_steps=args.checkpoint_interval_steps,
                                tensorboard=args.tensorboard, reward_log_interval_steps=args.reward_log_interval_steps,
                                rollout_steps=args.rollout_steps, seed=args.seed, device=args.device)
+    if args.curriculum is not None:
+        config = replace(config, curriculum=str(args.curriculum.resolve()))
     if args.resume:
         if args.run_dir is None:
             parser.error("resume requires --run-dir pointing to a new output directory")
-        if args.seed is not None or args.rollout_steps is not None or args.config is not None:
+        if (args.seed is not None or args.rollout_steps is not None or args.config is not None
+                or args.curriculum is not None or args.init_actor is not None):
             parser.error("resume restores MAPPO settings; only step budget, device, logging and schedule flags may override them")
     if sys.platform.startswith("linux"):
         os.environ.setdefault("MUJOCO_GL", "egl")
@@ -58,7 +63,8 @@ def main():
                       resume_eval_interval=args.eval_interval_steps,
                       resume_checkpoint_interval=args.checkpoint_interval_steps,
                       resume_tensorboard=args.tensorboard,
-                      resume_reward_interval=args.reward_log_interval_steps)
+                      resume_reward_interval=args.reward_log_interval_steps,
+                      init_actor=args.init_actor)
     print(f"Run: {trainer.run_dir}; device: {trainer.agent.device}", flush=True)
     trainer.train()
     return 0

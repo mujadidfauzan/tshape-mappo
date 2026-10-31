@@ -1,0 +1,8 @@
+# Same curriculum, physics, agent count and seeds; only reward mode differs.
+environment_config: configs/environment.yaml
+mappo_config: configs/mappo.yaml
+curriculum: configs/curricula/easy.yaml
+num_agents: [4]
+seeds: [11, 22, 33, 44, 55]
+reward_modes: [baseline, footprint_potential]
+total_steps: 2000000

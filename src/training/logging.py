@@ -24,13 +24,21 @@ class EpisodeStats:
             "max_penetration_mean_m": float(metrics["max_penetration_m"]),
             "completion_time_mean_s": info["completion_time_s"],
         })
+        diagnostics = info.get("diagnostics", {})
+        for name in ("footprint_error_m", "footprint_margin_m", "gate_clear_fraction"):
+            if name in diagnostics:
+                self.records[-1][name + "_mean"] = diagnostics[name]
+        if diagnostics:
+            for category in ("gate_blocked", "gate_not_reached", "contact_lost", "goal_not_settled",
+                             "goal_footprint_outside", "physics_failure"):
+                self.records[-1][category + "_rate"] = float(diagnostics.get("failure_category") == category)
 
     def summary(self):
         result = {"window_episodes": len(self.records)}
         if not self.records:
             return result
         for key in self.records[-1]:
-            values = [r[key] for r in self.records if r[key] is not None and math.isfinite(r[key])]
+            values = [r[key] for r in self.records if r.get(key) is not None and math.isfinite(r[key])]
             if values:
                 result[key] = sum(values) / len(values)
         return result

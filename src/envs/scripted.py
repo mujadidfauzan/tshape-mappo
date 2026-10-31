@@ -20,6 +20,8 @@ def scripted_actions(env, push_force=2.0):
     if not np.isfinite(push_force) or push_force <= 0:
         raise ValueError("push_force must be finite and positive")
     p = env.physics
+    if p.num_agents != 4:
+        raise ValueError("The scripted mechanics diagnostic is defined for four agents only; use random or learned policies")
     result = np.zeros((4, 2), dtype=np.float64)
     if env.object_inside_goal():
         return {name: result[i].astype(np.float32) for i, name in enumerate(p.agent_names)}

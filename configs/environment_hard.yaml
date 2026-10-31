@@ -1,3 +1,5 @@
+# Independent policies support 2, 4, 8 or 16 agents.
+num_agents: 4
 # Fixed three-room Hard course: two aligned 0.8 m openings at y=0.
 # Fixed right goal; random object in left room; random agents near the object.
 # 2,500 decisions x 50 ms = 125 seconds of simulated time.
