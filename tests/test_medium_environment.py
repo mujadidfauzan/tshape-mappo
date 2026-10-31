@@ -22,7 +22,7 @@ class MediumEnvironmentTests(unittest.TestCase):
         self.addCleanup(env.close)
         return env
 
-    def test_fixed_goal_random_object_full_yaw_and_both_agent_regions(self):
+    def test_fixed_goal_random_object_full_yaw_and_nearby_agents(self):
         env = self.make_env()
         goals, poses, agents = [], [], []
         for seed in range(300):
@@ -32,6 +32,9 @@ class MediumEnvironmentTests(unittest.TestCase):
             positions, velocities = p.get_agents_state()
             self.assertTrue(p.spawn_is_valid(env.config.spawn_clearance), f"seed={seed}")
             self.assertEqual(p.data.ncon, 0)
+            gaps = p.object_surface_distances(positions) - p.radii
+            self.assertTrue(np.all(gaps >= .04 - 1e-10))
+            self.assertTrue(np.all(gaps <= .15 + 1e-10))
             self.assertTrue(env._obstacle_task_is_valid(env.config.arena_spawn_margin))
             self.assertLess(obj["position"][0] * env.goal_center[0], 0)
             self.assertGreaterEqual(env._distance_to_goal(), env.config.minimum_goal_distance)
@@ -50,7 +53,6 @@ class MediumEnvironmentTests(unittest.TestCase):
         self.assertGreater(np.ptp(np.array(poses)[:, 1]), 3)
         self.assertLess(np.min(np.array(poses)[:, 2]), -3)
         self.assertGreater(np.max(np.array(poses)[:, 2]), 3)
-        self.assertTrue(np.all(np.ptp(agents, axis=0) > 4))
         first, initial = env.reset(seed=42)
         qpos = env.physics.data.qpos.copy()
         env.reset(seed=43)

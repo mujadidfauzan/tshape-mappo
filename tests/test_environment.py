@@ -184,11 +184,9 @@ class EnvironmentTests(unittest.TestCase):
         details["contacts"][0]["geoms"].append("modified")
         self.assertNotIn("modified", infos["agent_1"]["failure_details"]["contacts"][0]["geoms"])
 
-    def test_scripted_seed_46_does_not_exceed_contact_tolerance(self):
-        # Regression for results/m2_validation.json (step 185, 5.065 mm).
-        # This test is intentionally a full episode, not an isolated target check.
+    def test_fixed_scripted_transport_does_not_exceed_contact_tolerance(self):
         from src.envs.scripted import scripted_actions
-        env = self.make_env(randomize_reset=True, reset_distribution="legacy")
+        env = self.make_env(randomize_reset=False)
         env.reset(seed=46)
         info = None
         while env.agents:

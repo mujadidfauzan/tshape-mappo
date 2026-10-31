@@ -1,6 +1,6 @@
 # Fixed two-room Medium arena. Actor observations and reward match Easy.
 # Fixed goal in the right room; random object starts in the left room.
-# Agents are sampled independently across both rooms and the opening.
+# Agents start at random exterior positions near the object.
 difficulty: medium
 model_path: assets/mujoco/arena_medium.xml
 frame_skip: 50
@@ -13,7 +13,9 @@ success_angular_speed: 0.1
 success_hold_steps: 5
 randomize_reset: true
 randomize_goal: false
-reset_distribution: arena_wide
+reset_distribution: near_object
+# Random surface-to-surface gap between each agent and the object, in meters.
+agent_spawn_gap: [0.04, 0.15]
 arena_spawn_margin: 0.15
 minimum_goal_distance: 1.5
 spawn_clearance: 0.04

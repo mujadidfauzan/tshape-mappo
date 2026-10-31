@@ -1,4 +1,4 @@
-"""Arena-wide seeded reset coverage, collision clearance and goal consistency."""
+"""Random object poses with nearby randomized agents and collision clearance."""
 
 import unittest
 
@@ -15,7 +15,7 @@ class ResetRandomizationTests(unittest.TestCase):
         self.addCleanup(env.close)
         return env
 
-    def test_default_reset_covers_arena_and_full_yaw_without_overlaps(self):
+    def test_random_objects_cover_arena_but_agents_stay_near_surfaces(self):
         env = self.make_env()
         p = env.physics
         targets, objects, yaws, agents = [], [], [], []
@@ -27,6 +27,9 @@ class ResetRandomizationTests(unittest.TestCase):
             margin = env.config.arena_spawn_margin
             self.assertTrue(p.spawn_is_valid(clearance=env.config.spawn_clearance), msg=f"seed={seed}")
             self.assertEqual(p.data.ncon, 0)
+            gaps = p.object_surface_distances(positions) - p.radii
+            self.assertTrue(np.all(gaps >= env.config.agent_spawn_gap[0] - 1e-10))
+            self.assertTrue(np.all(gaps <= env.config.agent_spawn_gap[1] + 1e-10))
             self.assertTrue(np.all(corners >= p.lower + margin - 1e-9))
             self.assertTrue(np.all(corners <= p.upper - margin + 1e-9))
             self.assertTrue(np.all(positions - p.radii[:, None] >= p.lower + margin - 1e-9))
@@ -42,7 +45,6 @@ class ResetRandomizationTests(unittest.TestCase):
             agents.append(positions)
         self.assertTrue(np.all(np.ptp(targets, axis=0) > 3.0))
         self.assertTrue(np.all(np.ptp(objects, axis=0) > 3.0))
-        self.assertTrue(np.all(np.ptp(agents, axis=0) > 4.0))
         self.assertLess(min(yaws), -3.0)
         self.assertGreater(max(yaws), 3.0)
 
@@ -82,17 +84,34 @@ class ResetRandomizationTests(unittest.TestCase):
         final["agent_0"]["initial_state"]["goal_center"][0] = 999
         self.assertNotEqual(final["agent_1"]["initial_state"]["goal_center"][0], 999)
 
-    def test_old_checkpoint_keeps_legacy_reset_for_evaluation(self):
+    def test_old_checkpoint_fields_are_migrated_without_restoring_old_samplers(self):
         config = EnvironmentConfig().to_dict()
-        config.pop("reset_distribution")
+        config.update(reset_distribution="arena_wide", object_position_noise=[.1, .1],
+                      object_yaw_noise=.15, agent_position_noise=.02)
         env = TShapeParallelEnv(config=load_checkpoint_config(config))
         self.addCleanup(env.close)
+        self.assertEqual(env.config.reset_distribution, "near_object")
+        self.assertFalse(hasattr(env.config, "agent_position_noise"))
         for seed in range(10):
             env.reset(seed=seed)
-            np.testing.assert_array_equal(env.goal_center, config["goal_center"])
-            position = env.physics.get_object_state()["position"]
-            self.assertTrue(np.all(np.abs(position) <= .1))
-            self.assertLessEqual(abs(env.physics.get_object_state()["yaw"]), .15)
+            positions, _ = env.physics.get_agents_state()
+            gaps = env.physics.object_surface_distances(positions) - env.physics.radii
+            self.assertTrue(np.all(gaps <= .15 + 1e-10))
+
+    def test_each_agent_can_start_at_different_exterior_sides_for_a_fixed_object(self):
+        env = self.make_env()
+        samples = []
+        for seed in range(150):
+            env.reset(seed=seed, options={"object_pose": [0, 0, 0]})
+            positions, _ = env.physics.get_agents_state()
+            samples.append(positions)
+            self.assertTrue(env.physics.spawn_is_valid(.04))
+        samples = np.asarray(samples)
+        for i in range(4):
+            self.assertLess(samples[:, i, 0].min(), -.2)
+            self.assertGreater(samples[:, i, 0].max(), .2)
+            self.assertLess(samples[:, i, 1].min(), -.6)
+            self.assertGreater(samples[:, i, 1].max(), .6)
 
 
 if __name__ == "__main__":

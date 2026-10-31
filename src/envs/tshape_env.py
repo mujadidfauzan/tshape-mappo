@@ -40,25 +40,24 @@ class TShapeParallelEnv(ParallelEnv):
         if (np.any(self.goal_center - self.goal_half_size < self.physics.lower)
                 or np.any(self.goal_center + self.goal_half_size > self.physics.upper)):
             raise ValueError("goal rectangle must be entirely inside the arena")
-        if cfg.reset_distribution == "arena_wide" and np.any(
+        if cfg.randomize_goal and np.any(
                 2 * (self.goal_half_size + cfg.arena_spawn_margin) >= self.physics.upper - self.physics.lower):
             raise ValueError("goal rectangle and spawn margin leave no room for target randomization")
         if not self.physics.goal_clear_of_obstacles(self.goal_center, self.goal_half_size, .005):
             raise ValueError("goal rectangle must be clear of internal obstacles")
+        self._start_room = None
         if self._rooms is not None:
             for lower, upper in (self._rooms[0], self._rooms[-1]):
                 if np.any(2 * (self.goal_half_size + cfg.arena_spawn_margin) >= upper - lower):
                     raise ValueError("goal rectangle and spawn margin must fit in either end room")
-            self._start_room = None
-            if not cfg.randomize_goal:
-                for side in (0, len(self._rooms) - 1):
-                    lower, upper = self._rooms[side]
-                    if (np.all(self.goal_center - self.goal_half_size >= lower + cfg.arena_spawn_margin)
-                            and np.all(self.goal_center + self.goal_half_size <= upper - cfg.arena_spawn_margin)):
-                        self._start_room = len(self._rooms) - 1 - side
-                        break
-                if self._start_room is None:
-                    raise ValueError("fixed goal must fit entirely in an end room with the spawn margin")
+            for side in (0, len(self._rooms) - 1):
+                lower, upper = self._rooms[side]
+                if (np.all(self.goal_center - self.goal_half_size >= lower + cfg.arena_spawn_margin)
+                        and np.all(self.goal_center + self.goal_half_size <= upper - cfg.arena_spawn_margin)):
+                    self._start_room = len(self._rooms) - 1 - side
+                    break
+            if self._start_room is None:
+                raise ValueError("fixed goal must fit entirely in an end room with the spawn margin")
         self.render_mode = render_mode
         self.viewer = None
         self.metadata = {**type(self).metadata, "name": f"tshape_{cfg.difficulty}_v1",
@@ -119,9 +118,8 @@ class TShapeParallelEnv(ParallelEnv):
 
     def _spawn_positions(self, pose, randomize):
         p = self.physics
-        if randomize and self.config.reset_distribution == "arena_wide":
-            margin = self.config.arena_spawn_margin + p.radii[:, None]
-            return self.np_random.uniform(p.lower + margin, p.upper - margin)
+        if randomize:
+            return self._sample_near_object_agents()
         top = p.model.geom("t_horizontal")
         stem = p.model.geom("t_vertical")
         gap = self.config.spawn_clearance
@@ -133,11 +131,44 @@ class TShapeParallelEnv(ParallelEnv):
             [stem.pos[0] - stem.size[0] - p.radii[2] - gap, stem.pos[1] - 0.5 * stem.size[1]],
             [stem.pos[0] - stem.size[0] - p.radii[3] - gap, stem.pos[1] + 0.5 * stem.size[1]],
         ])
-        if randomize:
-            local += self.np_random.uniform(-self.config.agent_position_noise,
-                                            self.config.agent_position_noise, (4, 2))
         c, s = np.cos(pose[2]), np.sin(pose[2])
         return local @ np.array([[c, s], [-s, c]]) + pose[:2]
+
+    def _sample_near_object_agents(self):
+        """Sample independent exterior faces, with no assigned agent roles.
+
+        Candidate distances are measured from the actual three-box footprint,
+        not the body center or its enclosing rectangle. Hidden internal faces,
+        crowded candidates and positions beside walls are rejected.
+        """
+        p, rng, cfg = self.physics, self.np_random, self.config
+        geoms = np.asarray(p.object_geom_ids)
+        half_sizes = p.model.geom_size[geoms, :2]
+        weights = half_sizes.sum(axis=1)
+        weights /= weights.sum()
+        positions = []
+        for i, radius in enumerate(p.radii):
+            for _ in range(cfg.reset_attempts):
+                geom = int(rng.choice(geoms, p=weights))
+                half = p.model.geom_size[geom, :2]
+                axis = int(rng.choice(2, p=half[::-1] / half.sum()))
+                sign = 1 if rng.integers(0, 2) else -1
+                point = rng.uniform(-half, half)
+                point[axis] = sign * half[axis]
+                gap = rng.uniform(*cfg.agent_spawn_gap)
+                point[axis] += sign * (radius + gap)
+                rotation = p.data.geom_xmat[geom].reshape(3, 3)[:2, :2]
+                candidate = rotation @ point + p.data.geom_xpos[geom, :2]
+                margin = max(cfg.arena_spawn_margin, cfg.spawn_clearance)
+                if (np.any(candidate - radius < p.lower + margin)
+                        or np.any(candidate + radius > p.upper - margin)):
+                    continue
+                if p.agent_spawn_is_valid(candidate, i, positions, cfg.spawn_clearance):
+                    positions.append(candidate)
+                    break
+            else:
+                return None  # Retry the object pose; never fall back to arena-wide agents.
+        return np.asarray(positions)
 
     def _sample_object_pose(self, room=None):
         p = self.physics
@@ -151,23 +182,20 @@ class TShapeParallelEnv(ParallelEnv):
             raise ValueError("transported object cannot fit within the arena spawn margin")
         return np.r_[self.np_random.uniform(lower, upper), yaw]
 
-    def _sample_goal(self, room=None):
+    def _sample_goal(self):
         margin = self.goal_half_size + self.config.arena_spawn_margin
-        bounds = (self.physics.lower, self.physics.upper) if room is None else self._rooms[room]
-        return self.np_random.uniform(bounds[0] + margin, bounds[1] - margin)
+        return self.np_random.uniform(self.physics.lower + margin, self.physics.upper - margin)
 
     def _obstacle_task_is_valid(self, clearance):
         """Start and goal stay in opposite end rooms, crossing every divider."""
         if self._rooms is None:
             return True
         corners = self.physics.object_corners()
-        for side in (0, len(self._rooms) - 1):
-            lower, upper = self._rooms[side]
-            if np.all(corners >= lower + clearance) and np.all(corners <= upper - clearance):
-                goal_lower, goal_upper = self._rooms[len(self._rooms) - 1 - side]
-                return bool(np.all(self.goal_center - self.goal_half_size >= goal_lower + clearance)
-                            and np.all(self.goal_center + self.goal_half_size <= goal_upper - clearance))
-        return False
+        lower, upper = self._rooms[self._start_room]
+        goal_lower, goal_upper = self._rooms[len(self._rooms) - 1 - self._start_room]
+        return bool(np.all(corners >= lower + clearance) and np.all(corners <= upper - clearance)
+                    and np.all(self.goal_center - self.goal_half_size >= goal_lower + clearance)
+                    and np.all(self.goal_center + self.goal_half_size <= goal_upper - clearance))
 
     def reset(self, seed=None, options=None):
         if seed is not None or not hasattr(self, "np_random"):
@@ -190,38 +218,26 @@ class TShapeParallelEnv(ParallelEnv):
         lock = self.viewer.lock() if self.viewer is not None else nullcontext()
         with lock:
             for _ in range(self.config.reset_attempts):
-                wide = randomize and self.config.reset_distribution == "arena_wide"
-                room = None
-                if wide and self._rooms is not None:
-                    if self.config.randomize_goal:
-                        side = (int(explicit_pose[0] >= 0) if explicit_pose is not None
-                                else int(self.np_random.integers(0, 2)))
-                        room = side * (len(self._rooms) - 1)
-                    else:
-                        room = self._start_room
-                if wide and self.config.randomize_goal:
-                    goal_room = None if room is None else len(self._rooms) - 1 - room
-                    self.goal_center[:] = self._sample_goal(goal_room)
-                else:
-                    self.goal_center[:] = self.config.goal_center
+                self.goal_center[:] = (self._sample_goal() if randomize and self.config.randomize_goal
+                                       else self.config.goal_center)
                 self.physics.model.site("goal").pos[:2] = self.goal_center
                 if explicit_pose is not None:
                     pose = explicit_pose.copy()
-                elif wide:
-                    pose = self._sample_object_pose(room)
+                elif randomize:
+                    pose = self._sample_object_pose(self._start_room)
                 else:
                     pose = np.r_[self.physics.model.body_pos[self.physics.object_body, :2], 0.0]
-                    if randomize:
-                        noise = np.asarray(self.config.object_position_noise)
-                        pose[:2] += self.np_random.uniform(-noise, noise)
-                        pose[2] += self.np_random.uniform(-self.config.object_yaw_noise,
-                                                         self.config.object_yaw_noise)
+                # Synchronize object geometry before sampling nearby agent surfaces.
+                # No physics step occurs with the provisional XML agent positions.
+                self.physics.reset(pose)
                 positions = explicit_agents if explicit_agents is not None else self._spawn_positions(pose, randomize)
+                if positions is None:
+                    continue
                 self.physics.reset(pose, positions)
-                if wide and (self._distance_to_goal() < self.config.minimum_goal_distance or self.object_inside_goal()):
+                if randomize and (self._distance_to_goal() < self.config.minimum_goal_distance or self.object_inside_goal()):
                     continue
                 # Reserve a small positive margin even when noise is disabled.
-                clearance = max(0.005, self.config.spawn_clearance) if wide else 0.005
+                clearance = max(0.005, self.config.spawn_clearance) if randomize else 0.005
                 if (self._obstacle_task_is_valid(clearance)
                         and self.physics.goal_clear_of_obstacles(self.goal_center, self.goal_half_size, clearance)
                         and self.physics.spawn_is_valid(clearance=clearance)):
@@ -245,7 +261,7 @@ class TShapeParallelEnv(ParallelEnv):
             self._initial_state = {"goal_center": self.goal_center.tolist(),
                 "object_position": obj["position"].tolist(), "object_yaw": obj["yaw"],
                 "agent_positions": positions.tolist(), "reset_distribution": self.config.reset_distribution,
-                "randomized": randomize, "goal_randomized": bool(wide and self.config.randomize_goal),
+                "randomized": randomize, "goal_randomized": bool(randomize and self.config.randomize_goal),
                 "difficulty": self.config.difficulty}
             observations = self._observations()
             self._last_observations = {name: obs.copy() for name, obs in observations.items()}

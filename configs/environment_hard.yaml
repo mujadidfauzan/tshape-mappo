@@ -1,5 +1,5 @@
-# Fixed three-room Hard course: two staggered 0.8 m openings.
-# Fixed right goal; random object in left room; random agents across all rooms.
+# Fixed three-room Hard course: two aligned 0.8 m openings at y=0.
+# Fixed right goal; random object in left room; random agents near the object.
 # 2,500 decisions x 50 ms = 125 seconds of simulated time.
 difficulty: hard
 model_path: assets/mujoco/arena_hard.xml
@@ -12,7 +12,9 @@ success_angular_speed: 0.1
 success_hold_steps: 5
 randomize_reset: true
 randomize_goal: false
-reset_distribution: arena_wide
+reset_distribution: near_object
+# Random surface-to-surface gap between each agent and the object, in meters.
+agent_spawn_gap: [0.04, 0.15]
 arena_spawn_margin: 0.15
 minimum_goal_distance: 1.5
 spawn_clearance: 0.04

@@ -11,9 +11,11 @@ success_linear_speed: 0.05
 success_angular_speed: 0.1
 success_hold_steps: 5
 
-# Training always uses arena-wide randomization; no CLI flag is needed.
+# Object/goal randomization stays broad; agents spawn randomly near the object.
 randomize_reset: true
-reset_distribution: arena_wide
+reset_distribution: near_object
+# Random surface-to-surface gap between each agent and the object, in meters.
+agent_spawn_gap: [0.04, 0.15]
 arena_spawn_margin: 0.15
 minimum_goal_distance: 1.5
 spawn_clearance: 0.04

@@ -43,18 +43,18 @@
         <geom name="wall_bottom" type="box" pos="0 -3 0.25"
               size="4.7 0.1 0.25" rgba="0.35 0.40 0.48 1"/>
 
-        <!-- Fixed Hard course: two 0.8 m openings, staggered vertically.
-             Divider 0: x=-1.1, opening y=[0.45, 1.25].
-             Divider 1: x= 1.1, opening y=[-1.25, -0.45].
+        <!-- Fixed Hard course: two aligned 0.8 m openings at y=0.
+             Divider 0: x=-1.1, opening y=[-0.4, 0.4].
+             Divider 1: x= 1.1, opening y=[-0.4, 0.4].
              The 2 m central room permits rotation and agents changing sides. -->
-        <geom name="obstacle_0_upper" type="box" pos="-1.1 2.075 0.25"
-              size="0.1 0.825 0.25" rgba="0.35 0.40 0.48 1"/>
-        <geom name="obstacle_0_lower" type="box" pos="-1.1 -1.225 0.25"
-              size="0.1 1.675 0.25" rgba="0.35 0.40 0.48 1"/>
-        <geom name="obstacle_1_upper" type="box" pos="1.1 1.225 0.25"
-              size="0.1 1.675 0.25" rgba="0.35 0.40 0.48 1"/>
-        <geom name="obstacle_1_lower" type="box" pos="1.1 -2.075 0.25"
-              size="0.1 0.825 0.25" rgba="0.35 0.40 0.48 1"/>
+        <geom name="obstacle_0_upper" type="box" pos="-1.1 1.65 0.25"
+              size="0.1 1.25 0.25" rgba="0.35 0.40 0.48 1"/>
+        <geom name="obstacle_0_lower" type="box" pos="-1.1 -1.65 0.25"
+              size="0.1 1.25 0.25" rgba="0.35 0.40 0.48 1"/>
+        <geom name="obstacle_1_upper" type="box" pos="1.1 1.65 0.25"
+              size="0.1 1.25 0.25" rgba="0.35 0.40 0.48 1"/>
+        <geom name="obstacle_1_lower" type="box" pos="1.1 -1.65 0.25"
+              size="0.1 1.25 0.25" rgba="0.35 0.40 0.48 1"/>
 
         <!-- Fixed task target; a non-colliding visual marker. -->
         <site name="goal" type="sphere" pos="3.25 1.5 0.05"

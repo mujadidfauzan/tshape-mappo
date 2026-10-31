@@ -19,15 +19,12 @@ from src.envs.tshape_env import TShapeParallelEnv
 from src.evaluation.evaluator import evaluate_policy
 from .config import load_mappo_config
 from .logging import EpisodeStats, RunLogger
+from .artifacts import write_json, record_evaluation
 
 
 def feature_schema():
     return {"actor": [[name, size] for name, size in ACTOR_FEATURES],
             "critic": [[name, size] for name, size in STATE_FEATURES]}
-
-
-def write_json(path, payload):
-    Path(path).write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
 
 
 class Trainer:
@@ -49,6 +46,7 @@ class Trainer:
         self.agent = None
         self.resume_source = str(Path(resume).resolve()) if resume is not None else None
         self.resume_best_score = None
+        saved_environment = None
         if resume is None:
             base_env = load_config(environment_config)
             model_xml = base_env.resolved_model_path.read_text()
@@ -94,18 +92,20 @@ class Trainer:
             torch.set_rng_state(training["torch_rng_state"])
             if self.agent.device.type == "cuda" and training.get("cuda_rng_state") is not None:
                 torch.cuda.set_rng_state(training["cuda_rng_state"], self.agent.device)
-            base_env = load_checkpoint_config(training["environment_config"])
+            saved_environment = training["environment_config"]
+            base_env = load_checkpoint_config(saved_environment)
             model_xml = training["model_xml"]
             if hashlib.sha256(model_xml.encode()).hexdigest() != training["model_sha256"]:
                 raise ValueError("checkpoint XML hash mismatch")
             if self._budget_reached():
                 raise ValueError("training budget must exceed the steps/episodes already in the checkpoint")
-        # New/resumed runs randomize starts; obstacle-task targets stay fixed.
-        previous_reset_distribution = base_env.reset_distribution
-        previous_randomize_goal = base_env.randomize_goal
-        reset_distribution_changed = previous_reset_distribution != "arena_wide" or not base_env.randomize_reset
+        # Read saved markers before migration so old statistics are not reused.
+        previous = saved_environment if saved_environment is not None else base_env.to_dict()
+        previous_reset_distribution = previous.get("reset_distribution", "legacy")
+        previous_randomize_goal = previous.get("randomize_goal", True)
+        reset_distribution_changed = previous_reset_distribution != "near_object" or not base_env.randomize_reset
         goal_distribution_changed = base_env.difficulty != "easy" and previous_randomize_goal
-        base_env = replace(base_env, reset_distribution="arena_wide", randomize_reset=True,
+        base_env = replace(base_env, reset_distribution="near_object", randomize_reset=True,
                            randomize_goal=previous_randomize_goal if base_env.difficulty == "easy" else False)
         if self.agent is not None and (reset_distribution_changed or goal_distribution_changed):
             self.agent.obs_normalizer.reset()
@@ -120,6 +120,16 @@ class Trainer:
         snapshot.write_text(model_xml)
         self.environment_config = replace(base_env, model_path=str(snapshot))
         self.env = TShapeParallelEnv(config=self.environment_config)
+        if base_env.difficulty == "hard":
+            centers = []
+            for prefix in ("obstacle_0", "obstacle_1"):
+                upper = self.env.physics.model.geom(f"{prefix}_upper")
+                lower = self.env.physics.model.geom(f"{prefix}_lower")
+                centers.append((upper.pos[1] - upper.size[1] + lower.pos[1] + lower.size[1]) / 2)
+            if not np.allclose(centers, 0):
+                self.env.close()
+                raise ValueError("Hard training requires aligned openings at y=0. A resumed checkpoint keeps its saved XML; "
+                                 "start a new run with configs/environment_hard.yaml for the corrected course")
         dimensions = {"observation_size": self.env.obs_dim, "state_size": self.env.state_space.shape[0],
                       "action_size": 2, "num_agents": len(self.env.possible_agents)}
         if self.agent is None:
@@ -198,7 +208,7 @@ class Trainer:
                       updates=self.updates, model_sha256=self.model_hash,
                       checkpoint=str(self.run_dir / "checkpoints" / "latest.pt"),
                       checkpoint_is_overwritten=True)
-        write_json(directory / "evaluation.json", result)
+        record_evaluation(self.run_dir, result, kind="video")
         print(f"  video steps={self.steps}: {result['reports'][0]['video']['path']}", flush=True)
 
     def episode_seed(self):
@@ -297,12 +307,13 @@ class Trainer:
                         evaluation.update(environment_steps=self.steps, update=self.updates,
                                           scheduled_step=(self.next_eval_step if self.steps >= self.next_eval_step else None),
                                           final=final)
-                        write_json(self.run_dir / f"evaluation_{self.updates:06d}.json", evaluation)
                         self.logger.scalars("eval", evaluation["summary"], self.steps)
                         score = (evaluation["summary"]["success_rate"], evaluation["summary"]["mean_return"])
-                        if score > self.best_score:
+                        improved = score > self.best_score
+                        if improved:
                             self.best_score = score
                             self.checkpoint("best.pt")
+                        record_evaluation(self.run_dir, evaluation, best=improved)
                         print(f"  eval steps={self.steps} success={score[0]:.1%} mean_return={score[1]:.3f}", flush=True)
                         self.next_eval_step = self._next_threshold(cfg.eval_interval_steps)
                     if self.next_video_step is not None and self.steps >= self.next_video_step:

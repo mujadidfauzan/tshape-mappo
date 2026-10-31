@@ -8,7 +8,7 @@ Inspired by cooperative geometric puzzle-solving experiments involving ants and 
 
 The primary objective is to investigate **emergent cooperative behavior**, where multiple agents learn to coordinate through physical interactions without explicitly programmed individual roles.
 
-The current implementation supports **Easy, Medium and Hard arenas with four agents and global actor information**. Medium adds one divider; Hard adds two dividers with staggered openings. The obstacle layouts and their target positions are fixed. All three policies use the same observation features and reward. Limited-range observations, variable agent counts, and held-out-layout benchmarks are research extensions. Successful transport alone does not establish emergent coordination.
+The current implementation supports **Easy, Medium and Hard arenas with four agents and global actor information**. Medium adds one divider; Hard adds two dividers with aligned openings. Agents start at random exterior positions near the object. The obstacle layouts and their target positions are fixed. All three policies use the same observation features and reward. Limited-range observations, variable agent counts, and held-out-layout benchmarks are research extensions. Successful transport alone does not establish emergent coordination.
 
 ---
 
@@ -132,9 +132,9 @@ Joint damping and friction loss are used to model movement resistance and reduce
 
 Easy and Medium measure **5.8 x 5.8 m** internally. Easy has boundary walls only. Medium adds a fixed vertical divider at `x=0`, 0.2 m thick, with a **0.8 m opening** spanning `y=-0.4` to `0.4`. The object's 1.2 m span blocks some orientations; rotating it by 90 degrees gives a 0.6 m span across the opening.
 
-Hard measures **9.0 x 5.8 m**, with dividers at `x=-1.1` and `x=1.1`. Their 0.8 m openings are centered at `y=0.85` and `y=-0.85`, respectively. The middle room is 2.0 m wide so the object can translate, rotate, and leave room for agents to change sides. A constant-Y straight crossing cannot pass both staggered openings. These courses are inspired by the reference, not measured replicas of the original maze.
+Hard measures **9.0 x 5.8 m**, with dividers at `x=-1.1` and `x=1.1`. Both 0.8 m openings are centered at `y=0`, spanning `[-0.4, 0.4]`. The middle room is 2.0 m wide. After suitable rotation and alignment, the object can cross both dividers along the same line. These courses are inspired by the reference, not measured replicas of the original maze.
 
-Medium's target center stays at **`(1.8, 1.5)` m** and Hard's at **`(3.25, 1.5)` m** on every episode. Objects start randomly in the leftmost room, so successful transport must cross all dividers. Agents start independently throughout the free arena, not in an assigned formation.
+Medium's target center stays at **`(1.8, 1.5)` m** and Hard's at **`(3.25, 1.5)` m** on every episode. Objects start randomly in the leftmost room, so successful transport must cross all dividers. Agents start at independently randomized exterior positions around the object, with a 0.04–0.15 m surface-to-surface gap and no assigned pushing roles.
 
 Bodies remain at fixed height with zero gravity; the floor is visual only. Support resistance is approximated by joint damping and dry friction rather than physical floor contact.
 
@@ -252,34 +252,36 @@ An episode ends when:
 
 The goal half-size is `(0.75, 0.65)` m. Its center is randomized for Easy, fixed at `(1.8, 1.5)` m for Medium and `(3.25, 1.5)` m for Hard. There is no single required yaw: any orientation that fits and satisfies the settling criteria is allowed. Diagnostics run after every physics substep. The linear speed threshold of 5 m/s and object yaw-rate threshold of 10 rad/s are failure checks, not velocity controllers.
 
-### Arena-Wide Random Resets
+### Random Resets with Agents Near the Object
 
-Every newly started training process, including resume, **automatically** randomizes object pose and agent positions. Easy also randomizes the target; Medium and Hard keep their configured target fixed. No new command-line flag is required. The trainer enforces random object/agent starts and fixed obstacle-task goals even when loading an older checkpoint.
+Every newly started training process, including resume, randomizes object pose and agent positions. All four agents now start **0.04–0.15 m from the object's actual surface**. Easy also randomizes its target; Medium and Hard keep their configured target fixed. No new CLI flag is needed.
 
-| Reset variable | Training distribution |
+| Reset variable | Current distribution |
 | --- | --- |
-| Goal center | Across the arena, keeping the complete goal rectangle at least 0.15 m from the walls; default XY ranges are `[-2.0, 2.0]` and `[-2.1, 2.1]` m |
-| Object yaw | Sampled over `[-pi, pi]`, covering all orientations |
-| Object XY position | Across the feasible arena region for its sampled orientation, with all box corners at least 0.15 m from walls |
-| Each agent | Independently across the arena, with its complete disk at least 0.15 m from walls; no assigned starting formation |
-| Object-to-goal center distance | At least 1.5 m; already-solved initial states are rejected |
-| Agent/object and agent/agent clearance | At least 0.04 m between surfaces |
+| Object yaw | Full `[-pi, pi]` range |
+| Object XY | Across the feasible arena for Easy; inside the starting end room for Medium/Hard |
+| Each agent | Random exterior face and position on the actual compound object, with a surface gap sampled from `[0.04, 0.15]` m |
+| Easy goal center | Random across the arena, with the complete rectangle at least 0.15 m from walls |
+| Medium / Hard goal center | Fixed at `(1.8, 1.5)` / `(3.25, 1.5)` m |
+| Object and agent outer-wall margin | At least 0.15 m |
+| Agent/agent and internal-wall clearance | At least 0.04 m |
+| Minimum object-to-goal center distance | 1.5 m; already-solved starts are rejected |
 
-Object position bounds depend on its orientation and exact compound footprint, rather than clamping a sampled body center after the fact. Invalid joint samples are rejected until a non-overlapping configuration is found. Goal visualization, actor observations, critic state, reward, and success checks all use the sampled target. Reset and terminal info include `initial_state` with the actual target, object pose and all agent positions, so episode logs/evaluation JSON can be audited.
+The sampler uses exterior faces of the three object boxes. Candidates on hidden internal faces, too close to another agent, or beside a wall are rejected. Each agent can appear on different sides across episodes; the randomized sampler does not assign the four agents fixed slots. Distances refer to the object footprint, not its body center or enclosing rectangle. Object position and orientation remain broadly randomized; the reduced randomization concerns agent placement.
 
-The table above describes Easy. For **Medium and Hard**, the complete object is sampled inside the leftmost room with full yaw randomization and the goal stays at its fixed position in the rightmost room. The 0.15 m object spawn margin applies to the room boundaries, including the divider. Agents are sampled independently across all rooms and openings, with at least 0.04 m clearance from bodies and walls. Minimum object-to-goal-center distance remains 1.5 m. Divider geometry never changes. Every valid task requires crossing all openings. The initial distribution thus varies positions and orientations, rather than switching the task direction.
+Tune the gap in `agent_spawn_gap: [0.04, 0.15]` in the environment YAML. Its minimum must be at least `spawn_clearance`. Seeded resets reproduce the same object, goal, nearby agents and action-space sampling. Reset/terminal info records the actual initial state and `reset_distribution: near_object`.
 
-The same seed reproduces target, object pose, agent positions, and action-space sampling within the same software/model configuration. Training changes its episode seed; periodic validation intentionally repeats its validation seeds. The goal remains fixed during an episode. Broad randomization makes the learning task substantially different from the earlier near-contact formation.
+The old arena-wide agent sampler, legacy small-noise reset branch, and `object_position_noise`, `object_yaw_noise`, `agent_position_noise` fields were removed. Fixed deterministic starts remain available for physics/scripted diagnostics with `--no-randomize`; they are not a training mode.
 
-Legacy checkpoints without a reset-distribution marker keep their original fixed target and small pose noise **when evaluated**. New checkpoints store `reset_distribution: arena_wide`. When training resumes a legacy checkpoint, the trainer switches to arena-wide resets, resets actor/critic input-normalization statistics and the rolling episode-statistics window, and records the transition in `manifest.json`. Model weights and optimizer state are retained. Resume of an already arena-wide run preserves its normalization/statistics history unless its goal distribution changes as described below. Fixed-reset options remain available for environment diagnostics and tests, not as a training CLI mode.
+Old checkpoint configurations are translated to the current near-object reset instead of keeping old sampling implementations in the environment. Evaluation records `reset_distribution_migrated` and `saved_reset_distribution`, so new scores are not mistaken for the old task distribution. Medium/Hard goals are fixed after migration too. Resume retains weights, optimizer state and cumulative steps, but clears both input normalizers and the rolling episode-statistics window when the saved distribution changes. The manifest records the migration.
 
-Checkpoints also store `randomize_goal` explicitly. Older Medium checkpoints without this field keep their original randomized goals **during evaluation**, preserving comparisons with past results. Resuming them for training adopts the fixed configured goal, resets both input normalizers and the rolling episode-statistics window, and records `goal_distribution_changed` in the new manifest. Weights, optimizers and cumulative steps are retained. New fixed-goal Medium/Hard checkpoints preserve their fixed goals in evaluation and resume. An already-running Medium process keeps its old distribution until restarted/resumed with the updated code; changing files does not update an in-memory environment.
-
-To evaluate an older Medium policy specifically on the new fixed-target task, use the existing environment override and save the report separately from its original-task evaluation:
+Checkpoints still contain their original MuJoCo XML. Resuming an older Hard checkpoint cannot silently replace its course geometry. Training rejects saved Hard XML whose openings are not aligned at `y=0`. Start a **new Hard run** to train the corrected aligned course. To evaluate old weights specifically on the current course and nearby-agent resets, use the existing override:
 
 ```bash
-python scripts/evaluate.py results/mappo_medium/checkpoints/best.pt --env-config configs/environment_medium.yaml --device auto --episodes 50 --seed 200000 --json results/mappo_medium/eval_fixed_target_50.json
+python scripts/evaluate.py results/mappo_hard/checkpoints/best.pt --env-config configs/environment_hard.yaml --device auto --episodes 50 --seed 200000 --json results/mappo_hard/eval_aligned_near_object.json
 ```
+
+An already-running process keeps its previous environment until restarted/resumed with the updated code.
 
 ## 5. MAPPO Algorithm
 
@@ -468,7 +470,7 @@ python scripts/test_environment.py --policy random --episodes 5
 Scripted transport and API validation:
 
 ```bash
-python scripts/test_environment.py --policy scripted --episodes 5 --seed 42 --require-success --json results/scripted_validation.json
+python scripts/test_environment.py --policy scripted --no-randomize --episodes 5 --seed 42 --require-success --json results/scripted_validation.json
 python scripts/test_environment.py --policy scripted --no-randomize --render --episodes 1
 python scripts/test_environment.py --api-test
 ```
@@ -594,7 +596,7 @@ python scripts/train.py --resume results/mappo_video/checkpoints/latest.pt --tot
 
 The target must exceed the saved timestep count; it includes prior training rather than adding that many new steps. For example, resuming from 1,350,000 steps with a 2,000,000-step target collects 650,000 additional steps. A legacy episode-budget checkpoint requires an explicit `--total-steps` to avoid carrying over an unintended budget. Legacy YAML with `total_episodes` also requires an explicit step override.
 
-Resume restores MAPPO and physics/task settings, while enforcing arena-wide random resets as described above. The CLI permits changing step budget, device, interval flags, `--tensorboard`/`--no-tensorboard`, and `--reward-log-interval-steps`. Do not pass `--config`, `--env-config`, `--seed`, or `--rollout-steps` to override a resumed run. Old `eval_interval`/`checkpoint_interval` values are converted from update counts to step intervals using the saved rollout length. A positive legacy `video_interval_episodes` becomes the new default 100,000-step interval (zero remains disabled); provide `--video-interval-steps` to choose another interval.
+Resume restores MAPPO and saved XML, while enforcing nearby randomized agents and fixed obstacle-task goals as described above. The CLI permits changing step budget, device, interval flags, `--tensorboard`/`--no-tensorboard`, and `--reward-log-interval-steps`. Do not pass `--config`, `--env-config`, `--seed`, or `--rollout-steps` to override a resumed run. Old `eval_interval`/`checkpoint_interval` values are converted from update counts to step intervals using the saved rollout length. A positive legacy `video_interval_episodes` becomes the new default 100,000-step interval (zero remains disabled); provide `--video-interval-steps` to choose another interval.
 
 Resume starts a fresh physics episode and discards any partial rollout/episode. It restores RNG and optimizers but is not an exact continuation of uninterrupted training. Completed-episode and rolling-statistics history are restored; a discarded partial episode does not count as completed. Old checkpoints without rolling statistics start a new statistics window; old completed-episode counters may use `episode_index` as an estimate. Schedules continue at the next global step multiple, without replaying missed videos. Each resumed run selects its own `best.pt`; the previous run retains its previous best.
 
@@ -637,9 +639,10 @@ Output for the first milestone:
 
 ```text
 results/mappo_video/videos/step_000100352/
-├── policy_seed_100000.mp4
-└── evaluation.json
+└── policy_seed_100000.mp4
 ```
+
+The complete video report is appended to the run's `evaluations.jsonl` with `kind: "video"`; automatic recording does not create a separate JSON file in each video directory.
 
 Videos use the top camera, native 1920 x 1080 frames, H.264/MP4, and CRF 18. Frame rate follows the control interval: 20 fps by default. Recording includes the initial state, so a 500-step episode contains 501 frames and lasts 25.05 seconds. Frames stream to FFmpeg instead of accumulating in RAM.
 
@@ -657,12 +660,25 @@ The console prints PPO update, cumulative step budget, completed episodes, rolli
 | `arena.xml`, `environment.yaml`, `mappo.yaml` | Model/configuration snapshots for that run |
 | `episodes.jsonl` | Team return, seed, success, stability, end reason, distance, path length, wall contacts, control effort, penetration |
 | `updates.jsonl` | Losses, KL, entropy, throughput, all-transition reward/component means, rolling and rollout episode metrics |
-| `evaluation_XXXXXX.json` | Deterministic evaluation indexed by PPO update, including actual and scheduled step metadata |
+| `evaluations.jsonl` | Complete periodic and video evaluation history, one report per line; `kind` is `evaluation` or `video` |
+| `evaluation_latest.json`, `evaluation_best.json` | Two overwritten snapshots for the latest and best periodic evaluation |
 | `checkpoints/best.pt`, `checkpoints/latest.pt` | The two retained training model files |
-| `videos/step_XXXXXXXXX/` | Video and evaluation report indexed by actual training step |
+| `videos/step_XXXXXXXXX/` | MP4 indexed by actual training step; metadata lives in `evaluations.jsonl` |
 | `tensorboard/events.out.tfevents.*` | Training/evaluation scalars with cumulative timesteps as the X axis |
 
 `mean_episode_return`, `rollout_success_rate`, and `rollout_stable_rate` retain their per-rollout meaning and appear only when an episode ends in that rollout. `rolling_episode_stats` instead uses the last `stats_window_size` completed episodes and remains available across rollouts with no completed episode. Control effort is integrated squared actuator force in N²·s, not mechanical energy. Wall collision events count new contact-pair occurrences rather than every contact frame.
+
+Training no longer creates `evaluation_XXXXXX.json` files. The full evaluation frequency and episode-level data are retained in one JSONL history; only the two convenient latest/best JSON snapshots are overwritten. Manual `scripts/evaluate.py --json ...` reports remain under the user's chosen filenames.
+
+To compact older stopped or copied runs:
+
+```bash
+python scripts/compact_results.py results/m4_random_arena results/mappo_medium results/mappo_hard
+```
+
+The utility first archives the exact original numbered and per-video JSON bytes into one `evaluation_archive.zip` per run, verifies the ZIP, writes and verifies `evaluations.jsonl`, then removes the loose originals. Checkpoints, MP4s, TensorBoard, training logs and custom evaluation reports remain in place. Repeating the command is safe; already-consolidated records are deduplicated. Source changes during compaction abort removal. Use it after stopping a writer or on a copied run; old running processes continue creating their old output layout until restarted/resumed with the updated trainer.
+
+Use `src.training.artifacts.read_evaluations(run_dir)` to read either layout (add `include_videos=True` for video reports). Original filenames and bytes remain recoverable from the ZIP archive if needed.
 
 ### TensorBoard Monitoring
 

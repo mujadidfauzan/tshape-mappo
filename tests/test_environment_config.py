@@ -14,9 +14,10 @@ class EnvironmentConfigTests(unittest.TestCase):
     def test_unknown_and_invalid_parameters_are_rejected(self):
         for config in ({"max_step": 5}, {"frame_skip": 1.5}, {"max_steps": 0},
                        {"difficulty": "unknown"}, {"difficulty": "medium", "reset_distribution": "legacy"},
-                       {"randomize_goal": "false"},
+                       {"randomize_goal": "false"}, {"difficulty": "hard", "randomize_goal": True},
                        {"goal_center": [float("nan"), 0]}, {"goal_half_size": [0, 1]},
-                       {"object_position_noise": [-1, 0]}, {"time_penalty": -1},
+                       {"agent_spawn_gap": [.2, .1]}, {"agent_spawn_gap": [.01, .15]},
+                       {"agent_spawn_gap": [-1, 0]}, {"time_penalty": -1},
                        {"randomize_reset": "false"}, {"reset_distribution": "unknown"},
                        {"arena_spawn_margin": -1}, {"minimum_goal_distance": -1}):
             with self.subTest(config=config):
@@ -35,7 +36,7 @@ class EnvironmentConfigTests(unittest.TestCase):
         legacy.pop("reset_distribution")
         legacy.pop("randomize_goal")
         old = load_checkpoint_config(legacy)
-        self.assertEqual((old.difficulty, old.reset_distribution), ("easy", "legacy"))
+        self.assertEqual((old.difficulty, old.reset_distribution), ("easy", "near_object"))
         self.assertTrue(old.randomize_goal)
 
     def test_hard_yaml_and_goal_defaults(self):

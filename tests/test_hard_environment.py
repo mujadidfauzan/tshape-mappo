@@ -35,6 +35,9 @@ class HardEnvironmentTests(unittest.TestCase):
             self.assertTrue(env._obstacle_task_is_valid(.15), f"seed={seed}")
             self.assertTrue(p.spawn_is_valid(.04), f"seed={seed}")
             self.assertEqual(p.data.ncon, 0)
+            gaps = p.object_surface_distances(agents) - p.radii
+            self.assertTrue(np.all(gaps >= .04 - 1e-10))
+            self.assertTrue(np.all(gaps <= .15 + 1e-10))
             self.assertTrue(np.all(p.object_corners()[:, 0] < -1.2))
             self.assertGreaterEqual(env._distance_to_goal(), env.config.minimum_goal_distance)
             self.assertFalse(infos["agent_0"]["initial_state"]["goal_randomized"])
@@ -47,7 +50,6 @@ class HardEnvironmentTests(unittest.TestCase):
         self.assertGreater(np.ptp(np.array(poses)[:, 1]), 3)
         self.assertLess(np.min(np.array(poses)[:, 2]), -3)
         self.assertGreater(np.max(np.array(poses)[:, 2]), 3)
-        self.assertTrue(np.all(np.ptp(positions, axis=0) > [7, 4]))
         first, infos = env.reset(seed=2026)
         qpos = p.data.qpos.copy()
         env.reset(seed=2027)
@@ -57,7 +59,7 @@ class HardEnvironmentTests(unittest.TestCase):
         for name in first:
             np.testing.assert_array_equal(first[name], replay[name])
 
-    def test_sampled_object_routes_pass_both_staggered_openings_and_enter_goal(self):
+    def test_sampled_object_routes_pass_both_aligned_openings_and_enter_goal(self):
         # Only geometric feasibility is checked here. The policy receives no route.
         env = self.make_env()
         p = env.physics
@@ -69,7 +71,7 @@ class HardEnvironmentTests(unittest.TestCase):
             center = np.array([-2.85, 0.])
             poses = [np.r_[start + a * (center - start), obj["yaw"]] for a in np.linspace(0, 1, 10)]
             poses += [np.r_[center, yaw] for yaw in np.linspace(obj["yaw"], np.pi / 2, 30)]
-            waypoints = [center, [-2.85, .85], [0, .85], [0, -.85], [2.85, -.85], env.goal_center.copy()]
+            waypoints = [center, [2.85, 0], env.goal_center.copy()]
             for previous, following in zip(waypoints, waypoints[1:]):
                 for a in np.linspace(0, 1, 40):
                     poses.append(np.r_[(1-a) * np.asarray(previous) + a * np.asarray(following), np.pi / 2])
@@ -83,7 +85,7 @@ class HardEnvironmentTests(unittest.TestCase):
     def test_each_opening_allows_physical_agent_push_and_blocks_unrotated_object(self):
         env = self.make_env()
         p = env.physics
-        for x, gap_y in [(-1.1, .85), (1.1, -.85)]:
+        for x, gap_y in [(-1.1, 0), (1.1, 0)]:
             with self.subTest(divider=x):
                 obj_x = x - 1.2
                 agents = np.array([[obj_x - .64, gap_y - .12], [obj_x - .64, gap_y + .12],
@@ -168,9 +170,8 @@ class HardEnvironmentTests(unittest.TestCase):
                              critic_hidden_size=8, eval_episodes=1, video_interval_steps=0, tensorboard=False)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            # The trainer enforces the requested fixed-target obstacle task.
             Trainer(root / "initial", config, replace(load_config("configs/environment_hard.yaml"),
-                max_steps=2, randomize_goal=True)).train()
+                max_steps=2)).train()
             checkpoint = root / "initial/checkpoints/latest.pt"
             agent, payload = MAPPO.from_checkpoint(checkpoint)
             saved = payload["training"]["environment_config"]
@@ -193,7 +194,7 @@ class HardEnvironmentTests(unittest.TestCase):
             self.assertFalse(manifest["normalization_reset"])
 
     @unittest.skipUnless(find_spec("torch"), "install requirements-training.txt for migration test")
-    def test_old_medium_random_goals_replay_in_eval_and_migrate_on_training_resume(self):
+    def test_old_checkpoint_reset_migration_is_applied_and_recorded(self):
         import torch
         from src.algorithms.mappo import MAPPO
         from src.training.config import MAPPOConfig
@@ -206,15 +207,17 @@ class HardEnvironmentTests(unittest.TestCase):
             _, payload = MAPPO.from_checkpoint(root / "initial/checkpoints/latest.pt")
             # Emulate a checkpoint written before the fixed-goal schema existed.
             payload["training"]["environment_config"].pop("randomize_goal")
+            payload["training"]["environment_config"]["reset_distribution"] = "arena_wide"
+            payload["training"]["environment_config"]["agent_position_noise"] = .02
             checkpoint = root / "old_random_medium.pt"
             torch.save(payload, checkpoint)
             old_env = TShapeParallelEnv(config=load_checkpoint_config(payload["training"]["environment_config"]))
             self.addCleanup(old_env.close)
-            goals = []
             for seed in range(30):
                 old_env.reset(seed=seed)
-                goals.append(old_env.goal_center.copy())
-            self.assertTrue(np.all(np.ptp(goals, axis=0) > 3))
+                np.testing.assert_array_equal(old_env.goal_center, [1.8, 1.5])
+                positions, _ = old_env.physics.get_agents_state()
+                self.assertTrue(np.all(old_env.physics.object_surface_distances(positions) - old_env.physics.radii <= .15 + 1e-10))
             resumed = Trainer(root / "resumed", config, resume=checkpoint, resume_step_budget=4)
             self.assertFalse(resumed.env.config.randomize_goal)
             self.assertEqual(resumed.agent.obs_normalizer.count.item(), 0)
@@ -222,11 +225,50 @@ class HardEnvironmentTests(unittest.TestCase):
             self.assertEqual(resumed.episode_stats.summary(), {"window_episodes": 0})
             manifest = json.loads((root / "resumed/manifest.json").read_text())
             self.assertTrue(manifest["goal_distribution_changed"])
-            self.assertFalse(manifest["reset_distribution_changed"])
+            self.assertTrue(manifest["reset_distribution_changed"])
             self.assertTrue(manifest["normalization_reset"])
             resumed.train()
             for episode in map(json.loads, (root / "resumed/episodes.jsonl").read_text().splitlines()):
                 self.assertEqual(episode["initial_state"]["goal_center"], [1.8, 1.5])
+
+    def test_two_openings_are_aligned_and_agents_push_through_both_continuously(self):
+        env = self.make_env()
+        p = env.physics
+        for prefix in ("obstacle_0", "obstacle_1"):
+            upper, lower = p.model.geom(f"{prefix}_upper"), p.model.geom(f"{prefix}_lower")
+            self.assertAlmostEqual(upper.pos[1] - upper.size[1], .4)
+            self.assertAlmostEqual(lower.pos[1] + lower.size[1], -.4)
+        p.reset([-2.3, 0, np.pi / 2], np.array([[-2.94, -.12], [-2.94, .12], [-4, -2.5], [4, 2.5]]))
+        actions = np.zeros((4, 2))
+        actions[:2, 0] = 1
+        for _ in range(140):
+            report = p.step(actions)
+            self.assertTrue(report["stable"], str(report["failure_details"]))
+        self.assertGreater(p.object_corners()[:, 0].min(), 1.2)
+
+    @unittest.skipUnless(find_spec("torch"), "install requirements-training.txt for training validation")
+    def test_training_refuses_an_obsolete_unaligned_hard_snapshot(self):
+        import xml.etree.ElementTree as ET
+        from src.training.config import MAPPOConfig
+        from src.training.trainer import Trainer
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = ET.parse("assets/mujoco/arena_hard.xml")
+            for geom in tree.findall("./worldbody/geom"):
+                if geom.get("name", "").startswith("obstacle_"):
+                    pos = np.fromstring(geom.get("pos"), sep=" ")
+                    size = np.fromstring(geom.get("size"), sep=" ")
+                    bottom, top = ((.6, 2.9) if geom.get("name").endswith("upper") else (-2.9, -.2))
+                    pos[1] = (bottom + top) / 2
+                    size[1] = (top - bottom) / 2
+                    geom.set("pos", " ".join(map(str, pos)))
+                    geom.set("size", " ".join(map(str, size)))
+            model = root / "unaligned.xml"
+            tree.write(model)
+            env = replace(load_config("configs/environment_hard.yaml"), model_path=str(model))
+            cfg = MAPPOConfig(total_steps=2, video_interval_steps=0, tensorboard=False)
+            with self.assertRaisesRegex(ValueError, "aligned openings"):
+                Trainer(root / "run", cfg, env)
 
 
 if __name__ == "__main__":

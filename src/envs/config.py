@@ -23,16 +23,12 @@ class EnvironmentConfig:
     success_angular_speed: float = 0.1
     success_hold_steps: int = 5
     randomize_reset: bool = True
-    # Resolved defaults: Easy randomizes goals; fixed-layout tasks do not.
-    # Stored explicitly so old random-goal checkpoints remain reproducible.
+    # Easy randomizes goals; obstacle tasks use a fixed target.
     randomize_goal: bool | None = None
-    reset_distribution: str = "arena_wide"
+    reset_distribution: str = "near_object"
     arena_spawn_margin: float = 0.15
     minimum_goal_distance: float = 1.5
-    # Retained for reproduction of legacy checkpoint reset distributions.
-    object_position_noise: tuple = (0.1, 0.1)
-    object_yaw_noise: float = 0.15
-    agent_position_noise: float = 0.02
+    agent_spawn_gap: tuple = (0.04, 0.15)
     spawn_clearance: float = 0.04
     reset_attempts: int = 100
     progress_weight: float = 2.0
@@ -46,12 +42,12 @@ class EnvironmentConfig:
     def __post_init__(self):
         if self.difficulty not in ("easy", "medium", "hard"):
             raise ValueError("difficulty must be easy, medium or hard")
-        if self.difficulty != "easy" and self.reset_distribution != "arena_wide":
-            raise ValueError("obstacle tasks require the arena_wide reset distribution")
         if self.randomize_goal is None:
             object.__setattr__(self, "randomize_goal", self.difficulty == "easy")
         if not isinstance(self.randomize_goal, bool):
             raise ValueError("randomize_goal must be a boolean")
+        if self.difficulty != "easy" and self.randomize_goal:
+            raise ValueError("Medium and Hard require a fixed target")
         for name in ("frame_skip", "max_steps", "success_hold_steps", "reset_attempts"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
@@ -59,20 +55,19 @@ class EnvironmentConfig:
             object.__setattr__(self, name, int(value))
         if not isinstance(self.randomize_reset, bool):
             raise ValueError("randomize_reset must be a boolean")
-        if self.reset_distribution not in ("arena_wide", "legacy"):
-            raise ValueError("reset_distribution must be arena_wide or legacy")
-        for name in ("goal_center", "goal_half_size", "object_position_noise"):
+        if self.reset_distribution != "near_object":
+            raise ValueError("reset_distribution must be near_object; obsolete reset modes were removed")
+        for name in ("goal_center", "goal_half_size", "agent_spawn_gap"):
             value = np.asarray(getattr(self, name), dtype=np.float64)
             if value.shape != (2,) or not np.isfinite(value).all():
                 raise ValueError(f"{name} must contain two finite numbers")
             if name == "goal_half_size" and np.any(value <= 0):
                 raise ValueError("goal_half_size must be positive")
-            if name == "object_position_noise" and np.any(value < 0):
-                raise ValueError("object_position_noise cannot be negative")
+            if name == "agent_spawn_gap" and (value[0] < 0 or value[1] < value[0]):
+                raise ValueError("agent_spawn_gap must be an ordered nonnegative [minimum, maximum]")
             object.__setattr__(self, name, tuple(float(x) for x in value))
         scalar_names = (
-            "success_linear_speed", "success_angular_speed", "object_yaw_noise",
-            "agent_position_noise", "spawn_clearance", "progress_weight",
+            "success_linear_speed", "success_angular_speed", "spawn_clearance", "progress_weight",
             "success_reward", "time_penalty", "failure_penalty", "max_penetration",
             "max_linear_speed", "max_angular_speed",
             "arena_spawn_margin", "minimum_goal_distance",
@@ -82,6 +77,8 @@ class EnvironmentConfig:
             if not np.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
             object.__setattr__(self, name, value)
+        if self.agent_spawn_gap[0] < self.spawn_clearance:
+            raise ValueError("agent_spawn_gap minimum must be at least spawn_clearance")
         if self.max_linear_speed <= 0 or self.max_angular_speed <= 0:
             raise ValueError("safety speed limits must be positive")
         if not isinstance(self.model_path, str) or not self.model_path:
@@ -118,5 +115,15 @@ def load_config(config=None, **overrides):
 
 
 def load_checkpoint_config(values):
-    """Old checkpoints retain their original reset semantics during evaluation."""
-    return load_config({"reset_distribution": "legacy", "randomize_goal": True, **values})
+    """Migrate saved task settings to the current reset contract, keeping XML separate.
+
+    Old sampling implementations are deliberately not retained in the runtime.
+    Training/evaluation record the changed reset distribution in their metadata.
+    """
+    values = dict(values)
+    for removed in ("object_position_noise", "object_yaw_noise", "agent_position_noise"):
+        values.pop(removed, None)
+    values["reset_distribution"] = "near_object"
+    if values.get("difficulty", "easy") != "easy":
+        values["randomize_goal"] = False
+    return load_config(values)

@@ -102,6 +102,8 @@ def main():
                 f"reason={report['end_reason']} wall={event['wall_seconds']:.1f}s")
 
     with tempfile.TemporaryDirectory(prefix="tshape-evaluation-") as temporary:
+        saved_config = training["environment_config"]
+        reset_migrated = False
         if args.env_config:
             config = load_config(args.env_config)
         else:
@@ -110,7 +112,11 @@ def main():
                 raise ValueError("checkpoint XML hash mismatch")
             snapshot = Path(temporary) / "arena.xml"
             snapshot.write_text(model_xml)
-            config = replace(load_checkpoint_config(training["environment_config"]), model_path=str(snapshot))
+            config = replace(load_checkpoint_config(saved_config), model_path=str(snapshot))
+            reset_migrated = (saved_config.get("reset_distribution") != config.reset_distribution
+                or saved_config.get("randomize_goal", True) != config.randomize_goal)
+            if reset_migrated:
+                say("Using the current near-object reset; this differs from the checkpoint's original task distribution.")
         model_xml = config.resolved_model_path.read_text()
         metadata.update(checkpoint=str(args.checkpoint.resolve()),
                       environment_config=config.to_dict(), model_xml=model_xml,
@@ -119,6 +125,8 @@ def main():
                       software_evaluation={name: str(version(name)) for name in
                                            ("torch", "mujoco", "numpy", "gymnasium", "pettingzoo", "PyYAML")},
                       environment_source="override" if args.env_config else "checkpoint_snapshot",
+                      reset_distribution_migrated=reset_migrated,
+                      saved_reset_distribution=saved_config.get("reset_distribution", "legacy"),
                       actual_device=str(agent.device), torch_threads=args.torch_threads)
         videos = min(args.episodes, args.video_episodes if args.video_episodes is not None else args.episodes) if args.video_dir else 0
         say(f"Evaluation: device={agent.device} mode={'stochastic' if args.stochastic else 'deterministic'} "

@@ -240,20 +240,34 @@ class TShapePhysics:
                 or np.any(positions + self.radii[:, None] > self.upper - clearance)):
             return False
         for i in range(4):
-            for lower, upper in self.obstacle_boxes:
-                nearest = np.clip(positions[i], lower, upper)
-                if np.linalg.norm(positions[i] - nearest) < self.radii[i] + clearance:
-                    return False
-            for j in range(i):
-                if np.linalg.norm(positions[i] - positions[j]) < self.radii[i] + self.radii[j] + clearance:
-                    return False
-            for geom in self.object_geom_ids:
-                rotation = self.data.geom_xmat[geom].reshape(3, 3)[:2, :2]
-                local = rotation.T @ (positions[i] - self.data.geom_xpos[geom, :2])
-                outside = np.maximum(np.abs(local) - self.model.geom_size[geom, :2], 0)
-                if np.linalg.norm(outside) < self.radii[i] + clearance:
-                    return False
+            if not self.agent_spawn_is_valid(positions[i], i, positions[:i], clearance):
+                return False
         return not self.data.ncon
+
+    def object_surface_distances(self, positions):
+        """Point-to-compound-footprint distance (before subtracting agent radius)."""
+        positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
+        distances = np.full(len(positions), np.inf)
+        for geom in self.object_geom_ids:
+            rotation = self.data.geom_xmat[geom].reshape(3, 3)[:2, :2]
+            local = (positions - self.data.geom_xpos[geom, :2]) @ rotation
+            outside = np.maximum(np.abs(local) - self.model.geom_size[geom, :2], 0)
+            distances = np.minimum(distances, np.linalg.norm(outside, axis=1))
+        return distances
+
+    def agent_spawn_is_valid(self, position, index, previous_positions, clearance):
+        """Validate a candidate without depending on provisional agent contacts."""
+        radius = self.radii[index]
+        if (np.any(position - radius < self.lower + clearance)
+                or np.any(position + radius > self.upper - clearance)):
+            return False
+        for lower, upper in self.obstacle_boxes:
+            if np.linalg.norm(position - np.clip(position, lower, upper)) < radius + clearance:
+                return False
+        for j, other in enumerate(previous_positions):
+            if np.linalg.norm(position - other) < radius + self.radii[j] + clearance:
+                return False
+        return bool(self.object_surface_distances(position)[0] >= radius + clearance - 1e-12)
 
     @staticmethod
     def _box_clear_of_rectangle(corners, lower, upper, clearance):
@@ -288,34 +302,34 @@ class TShapePhysics:
         to actor observations or critic state, or used to shape rewards.
         """
         if difficulty == "medium":
-            dividers = [("obstacle", 0.0, 0.0)]
+            dividers = [("obstacle", 0.0)]
             arena_x = (-2.9, 2.9)
         elif difficulty == "hard":
-            dividers = [("obstacle_0", -1.1, .85), ("obstacle_1", 1.1, -.85)]
+            dividers = [("obstacle_0", -1.1), ("obstacle_1", 1.1)]
             arena_x = (-4.5, 4.5)
         else:
             raise ValueError("room bounds require medium or hard difficulty")
-        expected = {f"{prefix}_{side}" for prefix, _, _ in dividers for side in ("upper", "lower")}
+        expected = {f"{prefix}_{side}" for prefix, _ in dividers for side in ("upper", "lower")}
         if {self.model.geom(i).name for i in self.obstacle_ids} != expected:
             raise ValueError(f"{difficulty} requires its named fixed divider geometries")
         if not (np.allclose([self.lower[0], self.upper[0]], arena_x)
                 and np.allclose([self.lower[1], self.upper[1]], [-2.9, 2.9])):
             raise ValueError(f"{difficulty} arena bounds do not match its fixed layout")
         rooms, left = [], self.lower[0]
-        for prefix, x, gap_y in dividers:
+        for prefix, x in dividers:
             upper, lower = self.model.geom(f"{prefix}_upper"), self.model.geom(f"{prefix}_lower")
-            if not (np.allclose(upper.pos[:2] - upper.size[:2], [x - .1, gap_y + .4])
+            opening_bottom = lower.pos[1] + lower.size[1]
+            opening_top = upper.pos[1] - upper.size[1]
+            if not (np.isclose(opening_top - opening_bottom, .8)
                     and np.allclose(upper.pos[:2] + upper.size[:2], [x + .1, self.upper[1]])
                     and np.allclose(lower.pos[:2] - lower.size[:2], [x - .1, self.lower[1]])
-                    and np.allclose(lower.pos[:2] + lower.size[:2], [x + .1, gap_y - .4])):
+                    and np.isclose(upper.pos[0] - upper.size[0], x - .1)
+                    and np.isclose(lower.pos[0] + lower.size[0], x + .1)):
                 raise ValueError(f"{difficulty} requires its fixed dividers and 0.8 m openings")
             rooms.append((np.array([left, self.lower[1]]), np.array([x - .1, self.upper[1]])))
             left = x + .1
         rooms.append((np.array([left, self.lower[1]]), self.upper.copy()))
         return tuple(rooms)
-
-    def medium_room_bounds(self):
-        return self.transport_room_bounds("medium")
 
     def step(self, actions, **safety_limits):
         actions = np.clip(finite_array(actions, (4, 2), "actions"), -1.0, 1.0)

@@ -26,6 +26,7 @@ class TrainingTests(unittest.TestCase):
     def test_step_video_milestones_encode_1080p_and_resume_counts_completed_episodes(self):
         import yaml
         from src.algorithms.mappo import MAPPO
+        from src.training.artifacts import read_evaluations
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
@@ -43,7 +44,9 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             for step, episodes in ((3, 1), (6, 3)):
                 folder = run / "videos" / f"step_{step:09d}"
-                report = json.loads((folder / "evaluation.json").read_text())
+                report = next(r for r in read_evaluations(run, include_videos=True)
+                              if r["kind"] == "video" and r["environment_steps"] == step)
+                self.assertFalse((folder / "evaluation.json").exists())
                 self.assertEqual(report["training_episodes"], episodes)
                 self.assertEqual(report["environment_steps"], step)
                 video = report["reports"][0]["video"]
@@ -59,6 +62,9 @@ class TrainingTests(unittest.TestCase):
                 self.assertTrue(report["checkpoint_is_overwritten"])
             self.assertEqual({p.name for p in (run / "checkpoints").iterdir()}, {"best.pt", "latest.pt"})
             self.assertFalse(list(run.rglob("*.partial.mp4")))
+            self.assertFalse(list(run.glob("evaluation_[0-9]*.json")))
+            self.assertEqual({p.name for p in run.glob("*.json")},
+                             {"manifest.json", "evaluation_latest.json", "evaluation_best.json"})
             # Enabling video must preserve the sampled training trajectory,
             # the learned parameters, normalization and the training RNG.
             without_video = path / "without_video"
@@ -99,7 +105,7 @@ class TrainingTests(unittest.TestCase):
             trainer = Trainer(path / "initial", config=config,
                               environment_config={"max_steps": 2, "randomize_reset": False})
             self.assertTrue(trainer.environment_config.randomize_reset)
-            self.assertEqual(trainer.environment_config.reset_distribution, "arena_wide")
+            self.assertEqual(trainer.environment_config.reset_distribution, "near_object")
             summary = trainer.train()
             self.assertEqual(summary["environment_steps"], 4)
             checkpoint = path / "initial" / "checkpoints" / "latest.pt"
@@ -170,6 +176,7 @@ class TrainingTests(unittest.TestCase):
     def test_step_schedule_crossings_and_empty_episode_statistics(self):
         from src.training.config import MAPPOConfig
         from src.training.trainer import Trainer
+        from src.training.artifacts import read_evaluations
         config = MAPPOConfig(total_steps=7, rollout_steps=3, ppo_epochs=1,
                              actor_hidden_size=8, critic_hidden_size=8, tensorboard=False,
                              eval_interval_steps=4, checkpoint_interval_steps=4, video_interval_steps=0)
@@ -182,7 +189,7 @@ class TrainingTests(unittest.TestCase):
                 summary = trainer.train()
             self.assertEqual(summary["environment_steps"], 7)
             self.assertEqual(summary["completed_episodes"], 0)
-            reports = [json.loads(p.read_text()) for p in sorted(run.glob("evaluation_*.json"))]
+            reports = read_evaluations(run)
             self.assertEqual([r["environment_steps"] for r in reports], [6, 7])
             self.assertEqual([r["scheduled_step"] for r in reports], [4, None])
             self.assertIn("return_mean=n/a success=n/a stable=n/a window=0", output.getvalue())
@@ -214,7 +221,7 @@ class TrainingTests(unittest.TestCase):
                 Trainer(path / "no_budget", replace(config, total_steps=4), resume=legacy)
             resumed = Trainer(path / "resumed", config, resume=legacy,
                               resume_step_budget=4, resume_eval_interval=2)
-            self.assertEqual(resumed.env.config.reset_distribution, "arena_wide")
+            self.assertEqual(resumed.env.config.reset_distribution, "near_object")
             self.assertEqual(resumed.agent.obs_normalizer.count.item(), 0)
             self.assertEqual(resumed.agent.state_normalizer.count.item(), 0)
             self.assertEqual(resumed.episode_stats.summary(), {"window_episodes": 0})

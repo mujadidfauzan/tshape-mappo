@@ -81,6 +81,24 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(len(report["reports"]), 1)
             self.assertFalse(report_path.with_suffix(".json.tmp").exists())
 
+    def test_old_checkpoint_eval_explicitly_records_current_reset_migration(self):
+        from scripts.evaluate import main
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = self.checkpoint(directory)
+            payload = torch.load(checkpoint, weights_only=True)
+            payload["training"]["environment_config"].update(reset_distribution="arena_wide",
+                object_position_noise=[.1, .1], object_yaw_noise=.15, agent_position_noise=.02)
+            torch.save(payload, checkpoint)
+            output = Path(directory) / "evaluation.json"
+            argv = ["evaluate.py", str(checkpoint), "--episodes", "1", "--json", str(output), "--quiet"]
+            with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)
+            report = json.loads(output.read_text())
+            self.assertTrue(report["reset_distribution_migrated"])
+            self.assertEqual(report["saved_reset_distribution"], "arena_wide")
+            self.assertEqual(report["environment_config"]["reset_distribution"], "near_object")
+            self.assertNotIn("agent_position_noise", report["environment_config"])
+
     @unittest.skipUnless(shutil.which("ffmpeg") and sys.platform.startswith("linux"), "requires FFmpeg and Linux EGL")
     def test_cli_records_only_requested_video_count_and_streams_progress(self):
         root = Path(__file__).resolve().parents[1]
