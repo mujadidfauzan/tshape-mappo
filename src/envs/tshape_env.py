@@ -1,4 +1,4 @@
-"""Four-agent Easy, Medium and Hard transport using the Parallel API."""
+"""Multi-agent Easy, Medium and Hard transport using the Parallel API."""
 
 from contextlib import nullcontext
 from copy import deepcopy
@@ -12,7 +12,7 @@ from .config import load_config
 from .observations import feature_layout, build_observations, build_state
 from .diagnostics import EpisodeDiagnostics
 from .physics import TShapePhysics, finite_array
-from .rewards import team_reward
+from .rewards import team_reward, wrapped_yaw_error
 from .termination import goal_is_settled, object_inside_goal
 
 
@@ -279,6 +279,7 @@ class TShapeParallelEnv(ParallelEnv):
             positions, _ = self.physics.get_agents_state()
             obj = self.physics.get_object_state()
             self._initial_state = {"goal_center": self.goal_center.tolist(),
+                "goal_yaw": self.config.goal_yaw,
                 "object_position": obj["position"].tolist(), "object_yaw": obj["yaw"],
                 "agent_positions": positions.tolist(), "reset_distribution": self.config.reset_distribution,
                 "randomized": randomize, "goal_randomized": bool(randomize and self.config.randomize_goal),
@@ -306,7 +307,10 @@ class TShapeParallelEnv(ParallelEnv):
         if distance is not None and not np.isfinite(distance):
             distance = None
         elapsed = float(self.physics.data.time) if np.isfinite(self.physics.data.time) else None
+        orientation_error = (abs(wrapped_yaw_error(self.physics.get_object_state()["yaw"], self.config.goal_yaw))
+                             if self._finite_physics() else None)
         return {"success": bool(success), "stable": bool(stable), "distance_to_goal": distance,
+                "goal_yaw": self.config.goal_yaw, "orientation_error_rad": orientation_error,
                 "difficulty": self.config.difficulty,
                 "num_agents": self.config.num_agents,
                 "diagnostics": self._episode_diagnostics.report(success, stable, end_reason is not None),
@@ -357,7 +361,8 @@ class TShapeParallelEnv(ParallelEnv):
             truncated = self.steps >= self.max_steps and not terminated
             distance = self._distance_to_goal() if self._finite_physics() else previous_distance
             reward, progress, components = team_reward(previous_distance, distance, success,
-                not stable, self.config, previous_error, self._episode_diagnostics.error)
+                not stable, self.config, previous_error, self._episode_diagnostics.error,
+                yaw=self.physics.get_object_state()["yaw"] if stable else None)
             self._metrics["episode_return"] += reward
             for key in ("object_path_length_m", "control_effort_N2_s", "wall_collision_events",
                         "wall_contact_physics_steps"):

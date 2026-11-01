@@ -24,6 +24,9 @@ def summarize_reports(reports):
             "completion_time_episodes": len(successful_times)}
     valid = [r for r in reports if not r["interrupted"]]
     if valid:
+        angles = [r["orientation_error_rad"] for r in valid if r.get("orientation_error_rad") is not None]
+        if angles:
+            result["orientation_error_rad_mean"] = float(np.mean(angles))
         result["failure_categories"] = dict(Counter(r.get("diagnostics", {}).get("failure_category", r.get("end_reason")) for r in valid))
         for name in ("footprint_error_m", "gate_clear_fraction"):
             values = [r["diagnostics"][name] for r in valid if name in r.get("diagnostics", {})]

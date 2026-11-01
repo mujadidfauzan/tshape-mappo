@@ -1,8 +1,8 @@
 # Independent policies, equal team-step budgets, fixed per-agent force (3 N/axis).
-# Baseline without curriculum isolates the agent-count factor.
+# Same four-component reward, without curriculum, for each agent count.
 environment_config: configs/environment_medium.yaml
 mappo_config: configs/mappo.yaml
 num_agents: [2, 4, 8, 16]
 seeds: [11, 22, 33, 44, 55]
-reward_modes: [baseline]
+reward_modes: [pose]
 total_steps: 2000000

@@ -85,12 +85,16 @@ class EnvironmentTests(unittest.TestCase):
         np.testing.assert_array_equal(controls[:, 0], env.physics.motor_limits[:, 0, 1])
         np.testing.assert_array_equal(controls[:, 1], env.physics.motor_limits[:, 1, 0])
 
-    def test_zero_actions_have_shared_time_penalty_and_time_limit(self):
+    def test_zero_actions_have_shared_distance_cost_and_time_limit(self):
         env = self.make_env(max_steps=1)
         env.reset(seed=42)
         observations, rewards, terminated, truncated, infos = env.step(self.zeros(env))
         self.assertEqual(set(observations), set(env.possible_agents))
-        self.assertEqual(set(rewards.values()), {-env.config.time_penalty})
+        distance = infos["agent_0"]["distance_to_goal"]
+        expected = -env.config.distance_weight * distance / (distance + env.config.distance_scale)
+        self.assertEqual(len(set(rewards.values())), 1)
+        self.assertAlmostEqual(rewards["agent_0"], expected)
+        self.assertNotIn("time", infos["agent_0"]["reward_components"])
         self.assertFalse(any(terminated.values()))
         self.assertTrue(all(truncated.values()))
         self.assertEqual(env.agents, [])
@@ -109,8 +113,30 @@ class EnvironmentTests(unittest.TestCase):
             self.assertEqual(all(terminated.values()), i == 2)
             self.assertFalse(any(truncated.values()))
         self.assertEqual(infos["agent_0"]["end_reason"], "success")
-        self.assertAlmostEqual(rewards["agent_0"], env.config.success_reward - env.config.time_penalty)
+        self.assertAlmostEqual(rewards["agent_0"], env.config.success_reward)
         self.assertEqual(env.agents, [])
+
+    def test_configured_goal_heading_is_logged_without_changing_observation_size(self):
+        env = self.make_env(goal_yaw=np.pi/2)
+        observations, infos = env.reset(seed=42)
+        self.assertEqual(observations["agent_0"].shape, (34,))
+        self.assertAlmostEqual(infos["agent_0"]["orientation_error_rad"], np.pi/2)
+        self.assertEqual(infos["agent_0"]["initial_state"]["goal_yaw"], np.pi/2)
+        _, rewards, _, _, infos = env.step(self.zeros(env))
+        parts = infos["agent_0"]["reward_components"]
+        self.assertLess(parts["orientation"], 0)
+        self.assertAlmostEqual(rewards["agent_0"], sum(parts.values()))
+        self.assertEqual(infos["agent_0"]["goal_yaw"], np.pi/2)
+
+    def test_orientation_reward_does_not_silently_add_a_success_yaw_tolerance(self):
+        env = self.make_env(success_hold_steps=1)
+        env.reset(seed=7, options={"randomize":False,"object_pose":[1.8,1.5,np.pi]})
+        _, rewards, terminated, _, infos = env.step(self.zeros(env))
+        self.assertTrue(all(terminated.values()))
+        self.assertTrue(infos["agent_0"]["success"])
+        self.assertAlmostEqual(infos["agent_0"]["orientation_error_rad"], np.pi)
+        self.assertLess(infos["agent_0"]["reward_components"]["orientation"], 0)
+        self.assertGreater(rewards["agent_0"],0)
 
     def test_short_end_bar_counts_towards_goal_containment(self):
         env = self.make_env()
@@ -159,7 +185,7 @@ class EnvironmentTests(unittest.TestCase):
         _, rewards, terminated, _, infos = env.step(self.zeros(env))
         self.assertTrue(all(terminated.values()))
         self.assertEqual(infos["agent_0"]["failure_reason"], "excessive_penetration")
-        self.assertAlmostEqual(rewards["agent_0"], -env.config.failure_penalty - env.config.time_penalty)
+        self.assertAlmostEqual(rewards["agent_0"], -env.config.failure_penalty)
 
     def test_penetration_failure_identifies_the_contact_and_actual_state(self):
         env = self.make_env()

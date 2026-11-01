@@ -20,7 +20,7 @@ def experiment_jobs(source, *, device=None, total_steps=None):
     algo = load_mappo_config(definition.get("mappo_config"), device=device,
                              total_steps=total_steps if total_steps is not None else definition.get("total_steps"))
     counts, seeds = definition.get("num_agents", [2, 4, 8, 16]), definition.get("seeds", [11, 22, 33, 44, 55])
-    modes = definition.get("reward_modes", ["baseline"])
+    modes = definition.get("reward_modes", [env.reward_mode])
     for name, values in (("num_agents", counts), ("seeds", seeds), ("reward_modes", modes)):
         if not isinstance(values, list) or not values or len(set(values)) != len(values):
             raise ValueError(f"{name} must be a nonempty list without duplicates")

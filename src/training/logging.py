@@ -18,6 +18,7 @@ class EpisodeStats:
             "success_rate": float(info["success"]),
             "stable_rate": float(info["stable"]),
             "distance_to_goal_mean": info["distance_to_goal"],
+            "orientation_error_rad_mean": info.get("orientation_error_rad"),
             "object_path_length_mean_m": float(metrics["object_path_length_m"]),
             "wall_collision_events_mean": float(metrics["wall_collision_events"]),
             "control_effort_mean_N2_s": float(metrics["control_effort_N2_s"]),

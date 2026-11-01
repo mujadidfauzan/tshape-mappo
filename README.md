@@ -204,43 +204,76 @@ All difficulty levels use the same feature definitions. With N agents, actor siz
 
 The environment uses a shared cooperative reward.
 
-The reward encourages agents to move the transported object toward the target while accounting for episode duration and physical failure conditions.
-
-Let $d_t$ be the Euclidean distance between the object's center of mass and the goal center. Let $g_t$ indicate success and $f_t$ indicate physical failure; each indicator is 0 or 1. Progress is suppressed on a failing transition:
+New runs default to `reward_mode: pose`, with four components:
 
 $$
-\Delta d_t =
-\begin{cases}
-d_{t-1} - d_t, & f_t = 0, \\
-0, & f_t = 1.
-\end{cases}
+r_t = w_1 r_{\mathrm{distance}} + w_2 r_{\mathrm{orientation}}
+    + w_3 r_{\mathrm{progress}} + w_4 r_{\mathrm{success}}.
 $$
 
-The default reward is:
+Let $d_t$ be the distance between the object's center of mass and goal center,
+and $\delta_t=\operatorname{atan2}(\sin(\theta_t-\theta_g),\cos(\theta_t-\theta_g))$
+be the shortest signed yaw error in radians. The components are:
 
 $$
-r_t = 2\Delta d_t - 0.001 + 20g_t - 20f_t.
+\begin{aligned}
+r_{\mathrm{distance}} &= -\frac{d_t}{d_t+s_d}, \\
+r_{\mathrm{orientation}} &= -e^{-d_t/s_o}\frac{|\delta_t|}{\pi}, \\
+r_{\mathrm{progress}} &= d_{t-1}-d_t, \\
+r_{\mathrm{success}} &= \mathbb{1}[\text{successful terminal transition}].
+\end{aligned}
 $$
 
-The same calculation in plain text, for Markdown viewers without math rendering:
+Plain-text equivalent for viewers without math rendering:
 
 ```text
-progress = 0 if physics_failure else previous_distance - current_distance
-reward = 2 * progress - 0.001 + 20 * success - 20 * physics_failure
+distance = -current_distance / (current_distance + distance_scale)
+yaw_error = atan2(sin(object_yaw - goal_yaw), cos(object_yaw - goal_yaw))
+orientation = -exp(-current_distance / orientation_distance_scale) * abs(yaw_error) / pi
+progress = previous_distance - current_distance
+reward = distance_weight * distance + orientation_weight * orientation
+         + progress_weight * progress + success_reward * int(success)
 ```
 
-| Component | Default setting |
-| --- | ---: |
-| Progress weight | 2.0 |
-| Time penalty per environment decision | 0.001 |
-| Success bonus | 20.0 |
-| Physical failure penalty | 20.0 |
+| Component / setting | YAML parameter | Default |
+| --- | --- | ---: |
+| Distance weight, $w_1$ | `distance_weight` | 0.1 |
+| Orientation weight, $w_2$ | `orientation_weight` | 0.05 |
+| Progress weight, $w_3$ | `progress_weight` | 2.0 |
+| Success weight, $w_4$ | `success_reward` | 20.0 |
+| Distance normalization, $s_d$ | `distance_scale` | 1.0 m |
+| Orientation proximity scale, $s_o$ | `orientation_distance_scale` | 1.0 m |
+| Preferred object heading, $\theta_g$ | `goal_yaw` | 0.0 rad |
 
-All agents receive the same team reward. Training stores it once per team transition; it is not multiplied by the agent count. Episode return is the sum of these rewards over an episode. A stationary episode has a return near -0.5 for Easy, -1.5 for Medium, or -2.5 for Hard at their full horizons; moving 1 cm closer in one ordinary step gives 0.019.
+Distance and orientation terms are nonpositive and approach zero as the pose improves;
+they provide no positive per-step reward for waiting near the goal. Progress can be positive
+or negative. Orientation matters more near the target, allowing the object to rotate while
+passing openings farther away. The unequal end bars distinguish headings separated by pi;
+angles are wrapped modulo 2*pi. `goal_yaw=0` means the long shaft is along world Y, with
+the large bar toward +Y. It is fixed for each policy, not randomized or added as a new
+observation feature; changing it defines a new task for training. It does not rotate the
+axis-aligned goal rectangle.
+
+There is no fixed time penalty in `pose` mode. Physical failure is an exceptional terminal
+override: reward is `-failure_penalty` (20 by default), with all four ordinary components
+zero. Diagnostics expose this override as `reward_components.failure`; it is zero on normal
+transitions. Invalid physics cannot earn progress, orientation, or success reward.
+
+All agents receive the same team reward. Training stores it once per team transition; it is not multiplied by the agent count. Episode return is the sum of these rewards over an episode. Tune the weights and scales in the corresponding environment YAML; they are initial settings, not a demonstrated optimal reward.
 
 There is currently no reward for an agent merely approaching/touching the object, no energy penalty, and no ordinary collision penalty. Valid pushing contact is necessary. Wall contacts and control effort are logged as diagnostics; a contact triggers the failure penalty only if it leads to a physical safety violation. The existing `wall_collision_events` and `wall_contact_physics_steps` metrics include all internal dividers. See [rewards.py](src/envs/rewards.py) for the implementation.
 
-Medium and Hard use the same Euclidean progress and reward weights as Easy. There are no rotation bonuses, waypoints, path-planner rewards, or extra maneuver incentives. A temporarily increasing goal distance can reduce reward even when the maneuver is useful; solving these baselines is an empirical training question.
+Medium and Hard use the same four-component reward and weights as Easy. There are no
+waypoints, path-planner rewards, or bonuses for a prescribed maneuver. A temporarily
+increasing goal distance can reduce reward even when the maneuver is useful; solving
+these tasks remains an empirical training question.
+
+The previous `baseline` and `footprint_potential` modes remain explicit alternatives for
+historical checkpoints and reward ablations. `baseline` retains `2*progress - 0.001 +
+20*success - 20*failure` at its original defaults. Checkpoints missing `reward_mode` are
+loaded as `baseline`. Resume keeps the saved reward; use a new run to test the new objective,
+or `--init-actor` to transfer actor weights into a new experiment. Compare success and
+physical metrics across reward modes; raw episode returns have different meanings.
 
 ### Episode Termination
 
@@ -250,7 +283,7 @@ An episode ends when:
 2. **Time limit (`truncated=True`):** the configured limit is reached without success or physical failure: 500 decisions for Easy, 1,500 for Medium, 2,500 for Hard.
 3. **Physical failure (`terminated=True`):** excessive penetration, leaving the arena, non-finite state, MuJoCo warnings, excessive speed, or an unexpected automatic simulator reset is detected.
 
-The goal half-size is `(0.75, 0.65)` m. Its center is randomized for Easy, fixed at `(1.8, 1.5)` m for Medium and `(3.25, 1.5)` m for Hard. There is no single required yaw: any orientation that fits and satisfies the settling criteria is allowed. Diagnostics run after every physics substep. The linear speed threshold of 5 m/s and object yaw-rate threshold of 10 rad/s are failure checks, not velocity controllers.
+The goal half-size is `(0.75, 0.65)` m. Its center is randomized for Easy, fixed at `(1.8, 1.5)` m for Medium and `(3.25, 1.5)` m for Hard. `goal_yaw` is a preference in the reward; the success test remains full containment plus settling and does not impose an additional yaw tolerance. Diagnostics run after every physics substep. The linear speed threshold of 5 m/s and object yaw-rate threshold of 10 rad/s are failure checks, not velocity controllers.
 
 ### Random Resets with Agents Near the Object
 
@@ -464,15 +497,25 @@ Per-agent radius, mass and force limits and the object's physics remain fixed. M
 
 ### Reward Ablation
 
-The default remains `reward_mode: baseline`. `footprint_potential` replaces only the progress term with potential shaping: `Phi=-footprint_error` and `F=gamma*Phi(next)-Phi(current)`. Footprint error is the minimum translation needed to fit the oriented shape into the goal, with a positive deficit if its span cannot fit. It is zero exactly when the complete object fits; no target yaw or maneuver sequence is prescribed.
+The default is `reward_mode: pose`. The reward-ablation matrix compares the historical
+`baseline` against the new four-component `pose` objective, using the same Easy curriculum,
+four agents, equal budgets and five seeds. Agent-count matrices use `pose`; a custom matrix
+without `reward_modes` inherits the selected environment's reward mode. In custom matrices
+(including a manually created Hard matrix), set `reward_modes: [pose]` to use the new reward;
+an explicit `[baseline]` still selects the historical objective.
 
-True terminal states (success/physics failure) have zero next potential. Time-limit truncations retain their next potential, matching GAE continuation bootstrapping. Set `shaping_gamma` equal to MAPPO `gamma`; the trainer rejects a mismatch. Success, time and failure weights remain unchanged. Raw episode returns across the two reward modes are not comparable measures of task quality; compare success and physical metrics.
+`footprint_potential` remains available explicitly: it replaces the historical progress term
+with `Phi=-footprint_error` and `F=gamma*Phi(next)-Phi(current)`, retaining the historical
+time/success/failure terms. Footprint error is zero exactly when the complete shape fits.
+True terminal states have zero next potential; time-limit truncations retain it. Set
+`shaping_gamma` equal to MAPPO `gamma`; the trainer rejects a mismatch in this mode.
 
 ```bash
 python scripts/run_experiments.py configs/experiments/reward_ablation.yaml --output results/reward_ablation --dry-run
 ```
 
-This declares both rewards with the same Easy curriculum, four agents, equal budgets and five seeds. The implementation has pipeline/geometry tests; learned improvements still require running the experiments.
+This declares 10 independent runs / 20 million team steps. Learned improvements still
+require running the experiments; implementation checks do not establish policy performance.
 
 ## 6. Installation
 
@@ -790,7 +833,8 @@ The TensorBoard process runs on the remote PC; your local browser uses `http://l
 | `episode/return`, `episode/length`, `episode/success`, `episode/stable` | Individual completed-episode values, located at their terminal timestep |
 | `reward/step` | Raw shared reward sampled every `reward_log_interval_steps` (default 100) |
 | `reward/mean_step` | Mean reward across every transition in the rollout |
-| `reward/progress_mean`, `reward/time_mean`, `reward/success_mean`, `reward/failure_mean` | Mean weighted reward components across all rollout transitions; sum to `reward/mean_step` within rounding |
+| `reward/distance_mean`, `reward/orientation_mean`, `reward/progress_mean`, `reward/success_mean`, `reward/failure_mean` | Mean weighted components for `pose`; sum to `reward/mean_step` within rounding. Historical modes log `time_mean` instead of distance/orientation |
+| `rollout/orientation_error_rad_mean`, `eval/orientation_error_rad_mean` | Mean absolute wrapped yaw error relative to the fixed `goal_yaw`, in radians |
 | `eval/mean_return`, `eval/success_rate`, `eval/stable_rate` | Separate deterministic validation results |
 | `train/policy_loss`, `train/value_loss`, `train/entropy`, `train/approx_kl` | PPO update diagnostics |
 | `time/fps`, `time/total_timesteps`, `time/episodes` | Throughput and cumulative progress |

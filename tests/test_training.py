@@ -21,6 +21,39 @@ except ModuleNotFoundError:
 
 @unittest.skipIf(torch is None, "install requirements-training.txt for M3 tests")
 class TrainingTests(unittest.TestCase):
+    def test_pose_reward_components_reach_tensorboard_and_saved_evaluation(self):
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+        from src.algorithms.mappo import MAPPO
+        from src.evaluation.evaluator import evaluate_policy
+        from src.training.config import MAPPOConfig
+        from src.training.trainer import Trainer
+        config = MAPPOConfig(total_steps=16,rollout_steps=8,ppo_epochs=1,actor_hidden_size=8,
+                             critic_hidden_size=8,eval_interval_steps=8,eval_episodes=1,
+                             video_interval_steps=0,tensorboard=True)
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
+            path=Path(directory)/"pose"
+            trainer=Trainer(path,config,{"max_steps":4,"reward_mode":"pose","goal_yaw":.7})
+            trainer.train()
+            updates=[json.loads(line) for line in (path/"updates.jsonl").read_text().splitlines()]
+            for update in updates:
+                parts=update["reward_components_mean"]
+                self.assertEqual(set(parts),{"distance_mean","orientation_mean","progress_mean",
+                                             "success_mean","failure_mean"})
+                self.assertAlmostEqual(sum(parts.values()),update["reward_mean_step"],places=6)
+            tags=EventAccumulator(str(path/"tensorboard")).Reload().Tags()["scalars"]
+            self.assertIn("reward/distance_mean",tags)
+            self.assertIn("reward/orientation_mean",tags)
+            self.assertNotIn("reward/time_mean",tags)
+            self.assertIn("rollout/orientation_error_rad_mean",tags)
+            self.assertIn("eval/orientation_error_rad_mean",tags)
+            agent,payload=MAPPO.from_checkpoint(path/"checkpoints/latest.pt")
+            saved=payload["training"]["environment_config"]
+            self.assertEqual(saved["reward_mode"],"pose")
+            self.assertEqual(saved["goal_yaw"],.7)
+            result=evaluate_policy(agent,trainer.environment_config,episodes=1,seed=200000)
+            self.assertGreaterEqual(result["summary"]["orientation_error_rad_mean"],0)
+            self.assertLessEqual(result["summary"]["orientation_error_rad_mean"],3.141593)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe") and sys.platform.startswith("linux"),
                          "requires FFmpeg, ffprobe and Linux EGL for the video integration test")
     def test_step_video_milestones_encode_1080p_and_resume_counts_completed_episodes(self):
@@ -122,7 +155,7 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual([e.step for e in events.Scalars("eval/success_rate")], [4])
             for event in events.Scalars("reward/mean_step"):
                 total = sum(next(e.value for e in events.Scalars("reward/" + key + "_mean") if e.step == event.step)
-                            for key in ("progress", "time", "success", "failure"))
+                            for key in ("distance", "orientation", "progress", "success", "failure"))
                 self.assertAlmostEqual(event.value, total, places=6)
             before_rng = torch.get_rng_state().clone()
             before_count = agent.obs_normalizer.count.clone()

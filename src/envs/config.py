@@ -35,11 +35,16 @@ class EnvironmentConfig:
     reset_attempts: int = 100
     object_yaw_range: tuple = (-np.pi, np.pi)
     object_goal_distance_range: tuple | None = None
-    reward_mode: str = "baseline"
-    shaping_gamma: float = 0.99
+    reward_mode: str = "pose"
+    goal_yaw: float = 0.0
+    distance_weight: float = 0.1
+    orientation_weight: float = 0.05
+    distance_scale: float = 1.0
+    orientation_distance_scale: float = 1.0
+    shaping_gamma: float = 0.99  # footprint_potential only
     progress_weight: float = 2.0
     success_reward: float = 20.0
-    time_penalty: float = 0.001
+    time_penalty: float = 0.001  # historical baseline / footprint_potential only
     failure_penalty: float = 20.0
     max_penetration: float = 0.005
     max_linear_speed: float = 5.0
@@ -61,8 +66,12 @@ class EnvironmentConfig:
             object.__setattr__(self, name, int(value))
         if self.num_agents > 16:
             raise ValueError("num_agents must be between 1 and 16 for the validated arena sizes")
-        if self.reward_mode not in ("baseline", "footprint_potential"):
-            raise ValueError("reward_mode must be baseline or footprint_potential")
+        if self.reward_mode not in ("pose", "baseline", "footprint_potential"):
+            raise ValueError("reward_mode must be pose, baseline or footprint_potential")
+        if (isinstance(self.goal_yaw, bool) or not isinstance(self.goal_yaw, Real)
+                or not np.isfinite(self.goal_yaw)):
+            raise ValueError("goal_yaw must be a finite angle in radians")
+        object.__setattr__(self, "goal_yaw", float(self.goal_yaw))
         if (isinstance(self.shaping_gamma, bool) or not isinstance(self.shaping_gamma, Real)
                 or not np.isfinite(self.shaping_gamma) or not 0 <= self.shaping_gamma <= 1):
             raise ValueError("shaping_gamma must lie in [0, 1]")
@@ -90,12 +99,15 @@ class EnvironmentConfig:
             "success_reward", "time_penalty", "failure_penalty", "max_penetration",
             "max_linear_speed", "max_angular_speed",
             "arena_spawn_margin", "minimum_goal_distance",
+            "distance_weight", "orientation_weight", "distance_scale", "orientation_distance_scale",
         )
         for name in scalar_names:
             value = float(getattr(self, name))
             if not np.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
             object.__setattr__(self, name, value)
+        if self.distance_scale <= 0 or self.orientation_distance_scale <= 0:
+            raise ValueError("reward distance scales must be positive")
         if self.agent_spawn_gap[0] < self.spawn_clearance:
             raise ValueError("agent_spawn_gap minimum must be at least spawn_clearance")
         if self.object_goal_distance_range is not None and self.minimum_goal_distance > self.object_goal_distance_range[0]:
@@ -144,6 +156,9 @@ def load_checkpoint_config(values):
     values = dict(values)
     for removed in ("object_position_noise", "object_yaw_noise", "agent_position_noise"):
         values.pop(removed, None)
+    # Checkpoints predating reward modes used distance progress + time only.
+    # Never silently replace their objective when evaluating or resuming.
+    values.setdefault("reward_mode", "baseline")
     values["reset_distribution"] = "near_object"
     if values.get("difficulty", "easy") != "easy":
         values["randomize_goal"] = False

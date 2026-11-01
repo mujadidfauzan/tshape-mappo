@@ -143,7 +143,7 @@ class HardEnvironmentTests(unittest.TestCase):
                 contacts += report["wall_collision_events"]
             self.assertGreater(contacts, 0)
 
-    def test_physical_parameters_match_easy_and_reward_stays_euclidean(self):
+    def test_physical_parameters_match_easy_and_reward_uses_same_four_components(self):
         env = self.make_env(max_steps=1)
         easy = TShapePhysics()
         for field in ("body_mass", "body_inertia", "dof_damping", "dof_frictionloss",
@@ -157,8 +157,15 @@ class HardEnvironmentTests(unittest.TestCase):
         _, rewards, terminated, truncated, infos = env.step({name: np.zeros(2) for name in env.agents})
         self.assertFalse(any(terminated.values()))
         self.assertTrue(all(truncated.values()))
-        self.assertAlmostEqual(rewards["agent_0"], 2 * (distance - env._distance_to_goal()) - .001)
-        self.assertEqual(set(infos["agent_0"]["reward_components"]), {"progress", "time", "success", "failure"})
+        parts = infos["agent_0"]["reward_components"]
+        current_distance = env._distance_to_goal()
+        self.assertEqual(env.config.reward_mode, "pose")
+        self.assertAlmostEqual(parts["progress"], env.config.progress_weight * (distance - current_distance))
+        self.assertAlmostEqual(parts["distance"], -env.config.distance_weight *
+                               current_distance / (current_distance + env.config.distance_scale))
+        self.assertAlmostEqual(parts["orientation"], 0)
+        self.assertAlmostEqual(rewards["agent_0"], sum(parts.values()))
+        self.assertEqual(set(parts), {"distance", "orientation", "progress", "success", "failure"})
 
     @unittest.skipUnless(find_spec("torch"), "install requirements-training.txt for training integration")
     def test_hard_checkpoint_resume_and_evaluation_keep_fixed_target(self):

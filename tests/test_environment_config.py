@@ -10,6 +10,7 @@ class EnvironmentConfigTests(unittest.TestCase):
         self.assertEqual(config.frame_skip, 50)
         self.assertTrue(config.resolved_model_path.is_file())
         self.assertEqual(config.goal_center, (1.8, 1.5))
+        self.assertEqual(config.reward_mode, "pose")
 
     def test_unknown_and_invalid_parameters_are_rejected(self):
         for config in ({"max_step": 5}, {"frame_skip": 1.5}, {"max_steps": 0},
@@ -19,7 +20,11 @@ class EnvironmentConfigTests(unittest.TestCase):
                        {"agent_spawn_gap": [.2, .1]}, {"agent_spawn_gap": [.01, .15]},
                        {"agent_spawn_gap": [-1, 0]}, {"time_penalty": -1},
                        {"randomize_reset": "false"}, {"reset_distribution": "unknown"},
-                       {"arena_spawn_margin": -1}, {"minimum_goal_distance": -1}):
+                       {"arena_spawn_margin": -1}, {"minimum_goal_distance": -1},
+                       {"distance_weight": -1}, {"orientation_weight": float("nan")},
+                       {"distance_scale": 0}, {"orientation_distance_scale": -1},
+                       {"goal_yaw": float("inf")}, {"goal_yaw": True},
+                       {"reward_mode": "unknown"}):
             with self.subTest(config=config):
                 with self.assertRaises(ValueError):
                     load_config(config)
@@ -48,6 +53,14 @@ class EnvironmentConfigTests(unittest.TestCase):
         self.assertTrue(load_config({}).randomize_goal)
         self.assertFalse(load_config({"difficulty": "medium"}).randomize_goal)
         self.assertFalse(load_config({"difficulty": "hard"}).randomize_goal)
+
+    def test_checkpoint_without_reward_mode_keeps_historical_objective(self):
+        config = load_checkpoint_config({"max_steps": 500})
+        self.assertEqual(config.reward_mode,"baseline")
+        self.assertEqual(config.time_penalty,.001)
+        self.assertEqual(load_checkpoint_config({"reward_mode":"footprint_potential"}).reward_mode,
+                         "footprint_potential")
+        self.assertEqual(load_checkpoint_config(load_config().to_dict()),load_config())
 
 
 if __name__ == "__main__":

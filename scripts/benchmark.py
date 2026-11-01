@@ -84,6 +84,7 @@ def main():
                            "task_id": task_id, "protocol_id": protocol_id,
                            **{key: s.get(key) for key in ("episodes", "success_rate", "success_ci95_low", "success_ci95_high",
                                "stable_rate", "mean_return", "std_return", "mean_completion_time_s", "footprint_error_m_mean", "gate_clear_fraction_mean",
+                               "orientation_error_rad_mean",
                                "object_path_length_m_mean", "control_effort_N2_s_mean", "control_effort_per_agent_N2_s_mean", "wall_collision_events_mean")}}
                     for category in ("success", "gate_blocked", "gate_not_reached", "contact_lost", "goal_not_settled",
                                      "goal_footprint_outside", "physics_failure"):

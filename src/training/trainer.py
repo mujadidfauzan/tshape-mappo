@@ -295,7 +295,7 @@ class Trainer:
                     capacity = min(cfg.rollout_steps, cfg.total_steps - self.steps)
                     buffer = RolloutBuffer(capacity, **agent.dimensions)
                     completed = []
-                    component_totals = {key: 0.0 for key in ("progress", "time", "success", "failure")}
+                    component_totals = {}
                     for _ in range(capacity):
                         obs_array = np.stack([observations[name] for name in names])
                         state = env.state()
@@ -311,7 +311,7 @@ class Trainer:
                         self.steps += 1
                         self.logger.reward(rewards[names[0]], self.steps)
                         for key, value in infos[names[0]]["reward_components"].items():
-                            component_totals[key] += value
+                            component_totals[key] = component_totals.get(key, 0.0) + value
                         observations = next_obs
                         if term or trunc:
                             info = infos[names[0]]

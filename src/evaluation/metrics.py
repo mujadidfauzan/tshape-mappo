@@ -14,6 +14,7 @@ def aggregate_benchmarks(rows):
         row = dict(zip(keys, key))
         row.update(policies=len(members), unique_training_seeds=len({r["training_seed"] for r in members}))
         for metric in ("success_rate", "stable_rate", "mean_return", "mean_completion_time_s",
+                       "orientation_error_rad_mean",
                        "object_path_length_m_mean", "control_effort_N2_s_mean", "control_effort_per_agent_N2_s_mean"):
             values = [float(r[metric]) for r in members if r.get(metric) is not None]
             row[metric + "_mean"] = float(np.mean(values)) if values else None
