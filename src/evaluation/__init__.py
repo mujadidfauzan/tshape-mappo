@@ -1,1 +1,1 @@
-"""Policy evaluation on explicitly seeded episodes."""
+"""Fixed-layout policy evaluation and video recording."""

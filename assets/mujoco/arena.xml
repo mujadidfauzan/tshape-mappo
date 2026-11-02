@@ -43,16 +43,16 @@
         <geom name="wall_bottom" type="box" pos="0 -3 0.25"
               size="3.1 0.1 0.25" rgba="0.35 0.40 0.48 1"/>
 
-        <!-- Marker only: M1 does not implement a task reward or goal test. -->
-        <site name="goal" type="sphere" pos="2 1.5 0.05"
-              size="0.15" rgba="0.1 0.9 0.2 0.5"/>
+        <!-- Fixed, visual-only target rectangle. -->
+        <site name="goal" type="box" pos="1.5 1.5 0.004"
+              size="0.75 0.65 0.003" rgba="0.1 0.9 0.2 0.2"/>
 
         <!-- Photo-inspired asymmetric double crossbar: 1.2 m along Y,
              0.6 m across the large end and 0.3 m across the small end.
              Three boxes form one rigid body without overlapping volumes.
              Equal end-bar masses keep the center of mass at the body origin.
              Dimensions are a visual approximation, not measured source data. -->
-        <body name="t_shape" pos="0 0 0.11">
+        <body name="t_shape" pos="-1.5 -1.5 0.11">
             <!-- Preserve the user's tuned planar resistance:
                  XY damping 4 N*s/m and dry friction 1.5 N per axis;
                  yaw damping 0.8 N*m*s/rad and dry friction 0.16 N*m. -->
@@ -70,23 +70,23 @@
                   size="0.15 0.04 0.10" mass="0.5" rgba="0.95 0.45 0.08 1"/>
         </body>
 
-        <!-- First two agents start 4 cm clear of the large crossbar. -->
-        <body name="agent_0" pos="-0.18 0.45 0.04" childclass="agent">
+        <!-- Two agents below the large bar, two left of the stem; 4 cm gaps. -->
+        <body name="agent_0" pos="-1.68 -1.05 0.04" childclass="agent">
             <joint name="agent_0_x" axis="1 0 0"/>
             <joint name="agent_0_y" axis="0 1 0"/>
             <geom name="agent_0_geom" rgba="0.1 0.65 0.25 1"/>
         </body>
-        <body name="agent_1" pos="0.18 0.45 0.04" childclass="agent">
+        <body name="agent_1" pos="-1.32 -1.05 0.04" childclass="agent">
             <joint name="agent_1_x" axis="1 0 0"/>
             <joint name="agent_1_y" axis="0 1 0"/>
             <geom name="agent_1_geom" rgba="0.15 0.45 0.9 1"/>
         </body>
-        <body name="agent_2" pos="-1.8 -1.8 0.04" childclass="agent">
+        <body name="agent_2" pos="-1.61 -1.76 0.04" childclass="agent">
             <joint name="agent_2_x" axis="1 0 0"/>
             <joint name="agent_2_y" axis="0 1 0"/>
             <geom name="agent_2_geom" rgba="0.65 0.2 0.8 1"/>
         </body>
-        <body name="agent_3" pos="1.8 -1.8 0.04" childclass="agent">
+        <body name="agent_3" pos="-1.61 -1.24 0.04" childclass="agent">
             <joint name="agent_3_x" axis="1 0 0"/>
             <joint name="agent_3_y" axis="0 1 0"/>
             <geom name="agent_3_geom" rgba="0.9 0.2 0.2 1"/>

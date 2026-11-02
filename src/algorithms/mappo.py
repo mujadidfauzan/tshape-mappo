@@ -12,7 +12,7 @@ from src.agents.critic import CentralizedCritic
 from src.training.config import load_mappo_config
 from .normalization import RunningNormalizer
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 
 
 def resolve_device(name):
@@ -133,7 +133,7 @@ class MAPPO(nn.Module):
     def from_checkpoint(cls, path, device="cpu", load_optimizers=False):
         payload = torch.load(path, map_location="cpu", weights_only=True)
         if payload.get("format_version") != CHECKPOINT_VERSION:
-            raise ValueError("unsupported checkpoint format")
+            raise ValueError("unsupported checkpoint format; start a fresh fixed-Easy run")
         config = replace(load_mappo_config(payload["mappo_config"]), device=device)
         agent = cls(**payload["dimensions"], config=config)
         agent.load_state_dict(payload["model"])

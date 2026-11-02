@@ -1,11 +1,10 @@
-"""Shared planar MuJoCo mechanics for M1 diagnostics and the M2 environment."""
+"""Planar MuJoCo mechanics for the fixed four-agent Easy arena."""
 
 from pathlib import Path
 import re
 
 import mujoco
 import numpy as np
-from .model import model_with_agents
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "assets" / "mujoco" / "arena.xml"
@@ -19,12 +18,12 @@ def finite_array(value, shape, name):
 
 
 class TShapePhysics:
-    def __init__(self, frame_skip=50, model_path=MODEL_PATH, num_agents=None):
+    def __init__(self, frame_skip=50, model_path=MODEL_PATH):
         if isinstance(frame_skip, bool) or not isinstance(frame_skip, (int, np.integer)) or frame_skip < 1:
             raise ValueError("frame_skip must be a positive integer")
         self.model_path = Path(model_path).resolve()
         xml = self.model_path.read_text()
-        self.model_xml = model_with_agents(xml, num_agents) if num_agents is not None else xml
+        self.model_xml = xml
         self.model = m = mujoco.MjModel.from_xml_string(self.model_xml)
         self.data = mujoco.MjData(m)
         self.frame_skip = int(frame_skip)
@@ -34,8 +33,8 @@ class TShapePhysics:
             ], key=lambda name: int(name.split("_")[1])
         )
         self.num_agents = n = len(self.agent_names)
-        if not n or self.agent_names != [f"agent_{i}" for i in range(n)]:
-            raise ValueError("Agent names must be contiguous starting at agent_0")
+        if n != 4 or self.agent_names != [f"agent_{i}" for i in range(4)]:
+            raise ValueError("The Easy baseline requires exactly agent_0 through agent_3")
         self.agent_bodies = np.array([m.body(n).id for n in self.agent_names])
         self.agent_geom_ids = np.array([m.geom(f"{n}_geom").id for n in self.agent_names])
         self.agent_geoms = set(self.agent_geom_ids.tolist())
@@ -56,7 +55,6 @@ class TShapePhysics:
         self.motor_limits = m.actuator_ctrlrange[self.motor_ids].copy()
         if np.any(self.motor_limits[..., 0] >= 0) or np.any(self.motor_limits[..., 1] <= 0):
             raise ValueError("Agent force limits must straddle zero")
-        self.motors = self.motor_ids  # M1 diagnostic compatibility
         self.object_body = m.body("t_shape").id
         object_joints = [m.joint(n).id for n in ("t_x", "t_y", "t_yaw")]
         self.object_qpos = m.jnt_qposadr[object_joints]
@@ -70,25 +68,13 @@ class TShapePhysics:
         self.moving_geoms = np.array(sorted(self._moving_geom_set))
         self.radii = m.geom_size[self.agent_geom_ids, 0].copy()
         self.walls = {m.geom(f"wall_{side}").id for side in ("left", "right", "bottom", "top")}
-        self.obstacle_ids = [i for i in range(m.ngeom) if m.geom(i).name.startswith("obstacle_")]
-        self.obstacle_boxes = []
-        for geom in self.obstacle_ids:
-            if (m.geom_type[geom] != mujoco.mjtGeom.mjGEOM_BOX or m.geom_bodyid[geom] != 0
-                    or not np.allclose(m.geom_quat[geom], [1, 0, 0, 0])):
-                raise ValueError("Internal obstacles must be axis-aligned world-body boxes")
-            if not (m.geom_contype[geom] and m.geom_conaffinity[geom]):
-                raise ValueError("Internal obstacles must have collision enabled")
-            center, half = m.geom_pos[geom, :2], m.geom_size[geom, :2]
-            self.obstacle_boxes.append((center - half, center + half))
-        # Keep existing metric names: wall collisions include internal walls.
-        self.walls.update(self.obstacle_ids)
-        self.floor = m.geom("floor").id
+        if any(m.geom(i).name.startswith("obstacle_") for i in range(m.ngeom)):
+            raise ValueError("The Easy baseline has no internal obstacles")
         self.lower = np.array([m.geom("wall_left").pos[0] + m.geom("wall_left").size[0],
                                m.geom("wall_bottom").pos[1] + m.geom("wall_bottom").size[1]])
         self.upper = np.array([m.geom("wall_right").pos[0] - m.geom("wall_right").size[0],
                                m.geom("wall_top").pos[1] - m.geom("wall_top").size[1]])
-        # Do not dispatch to the M1 subclass's scenario-specific reset here.
-        TShapePhysics.reset(self)
+        self.reset()
 
     @property
     def control_dt(self):
@@ -192,9 +178,6 @@ class TShapePhysics:
         result["stable"] = result["failure_reason"] is None
         return result
 
-    def is_stable(self):
-        return self.diagnostics()["stable"]
-
     def failure_details(self):
         """Capture the actual failing state before the environment substitutes
         its last valid terminal observation. Only used on physics failure.
@@ -230,111 +213,6 @@ class TShapePhysics:
             })
         details["contacts"].sort(key=lambda item: item["penetration_m"], reverse=True)
         return details
-
-    def spawn_is_valid(self, clearance=0.0):
-        """Check actual compound shape, agent separation and arena bounds."""
-        if not self.is_stable():
-            return False
-        corners = self.object_corners()
-        if np.any(corners < self.lower + clearance) or np.any(corners > self.upper - clearance):
-            return False
-        if not self.object_clear_of_obstacles(clearance):
-            return False
-        positions, _ = self.get_agents_state()
-        if (np.any(positions - self.radii[:, None] < self.lower + clearance)
-                or np.any(positions + self.radii[:, None] > self.upper - clearance)):
-            return False
-        for i in range(self.num_agents):
-            if not self.agent_spawn_is_valid(positions[i], i, positions[:i], clearance):
-                return False
-        return not self.data.ncon
-
-    def object_surface_distances(self, positions):
-        """Point-to-compound-footprint distance (before subtracting agent radius)."""
-        positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
-        distances = np.full(len(positions), np.inf)
-        for geom in self.object_geom_ids:
-            rotation = self.data.geom_xmat[geom].reshape(3, 3)[:2, :2]
-            local = (positions - self.data.geom_xpos[geom, :2]) @ rotation
-            outside = np.maximum(np.abs(local) - self.model.geom_size[geom, :2], 0)
-            distances = np.minimum(distances, np.linalg.norm(outside, axis=1))
-        return distances
-
-    def agent_spawn_is_valid(self, position, index, previous_positions, clearance):
-        """Validate a candidate without depending on provisional agent contacts."""
-        radius = self.radii[index]
-        if (np.any(position - radius < self.lower + clearance)
-                or np.any(position + radius > self.upper - clearance)):
-            return False
-        for lower, upper in self.obstacle_boxes:
-            if np.linalg.norm(position - np.clip(position, lower, upper)) < radius + clearance:
-                return False
-        for j, other in enumerate(previous_positions):
-            if np.linalg.norm(position - other) < radius + self.radii[j] + clearance:
-                return False
-        return bool(self.object_surface_distances(position)[0] >= radius + clearance - 1e-12)
-
-    @staticmethod
-    def _box_clear_of_rectangle(corners, lower, upper, clearance):
-        """Separating-axis check for one oriented box and an XY rectangle.
-
-        Positive clearance is conservative at diagonal corners: accepted boxes
-        are separated by at least that distance along a separating axis.
-        """
-        edges = corners[[1, 2]] - corners[0]
-        axes = np.vstack((np.eye(2), edges / np.linalg.norm(edges, axis=1)[:, None]))
-        center, half = (lower + upper) / 2, (upper - lower) / 2
-        projections = corners @ axes.T
-        middle, radius = center @ axes.T, np.abs(axes) @ half
-        gaps = np.maximum(middle - radius - projections.max(axis=0),
-                          projections.min(axis=0) - middle - radius)
-        return bool(np.any(gaps > clearance - 1e-12))
-
-    def object_clear_of_obstacles(self, clearance=0.0):
-        corners = self.object_corners().reshape(-1, 4, 2)
-        return all(self._box_clear_of_rectangle(box, lower, upper, clearance)
-                   for box in corners for lower, upper in self.obstacle_boxes)
-
-    def goal_clear_of_obstacles(self, center, half, clearance=0.0):
-        return all(np.any(np.maximum(lower - (center + half), (center - half) - upper)
-                             > clearance - 1e-12)
-                   for lower, upper in self.obstacle_boxes)
-
-    def transport_room_bounds(self, difficulty):
-        """Validate a fixed course and return its ordered free room rectangles.
-
-        These layout coordinates are used for reset validation, never appended
-        to actor observations or critic state, or used to shape rewards.
-        """
-        if difficulty == "medium":
-            dividers = [("obstacle", 0.0)]
-            arena_x = (-2.9, 2.9)
-        elif difficulty == "hard":
-            dividers = [("obstacle_0", -1.1), ("obstacle_1", 1.1)]
-            arena_x = (-4.5, 4.5)
-        else:
-            raise ValueError("room bounds require medium or hard difficulty")
-        expected = {f"{prefix}_{side}" for prefix, _ in dividers for side in ("upper", "lower")}
-        if {self.model.geom(i).name for i in self.obstacle_ids} != expected:
-            raise ValueError(f"{difficulty} requires its named fixed divider geometries")
-        if not (np.allclose([self.lower[0], self.upper[0]], arena_x)
-                and np.allclose([self.lower[1], self.upper[1]], [-2.9, 2.9])):
-            raise ValueError(f"{difficulty} arena bounds do not match its fixed layout")
-        rooms, left = [], self.lower[0]
-        for prefix, x in dividers:
-            upper, lower = self.model.geom(f"{prefix}_upper"), self.model.geom(f"{prefix}_lower")
-            opening_bottom = lower.pos[1] + lower.size[1]
-            opening_top = upper.pos[1] - upper.size[1]
-            if not (np.isclose(opening_top - opening_bottom, .8)
-                    and np.allclose(upper.pos[:2] + upper.size[:2], [x + .1, self.upper[1]])
-                    and np.allclose(lower.pos[:2] - lower.size[:2], [x - .1, self.lower[1]])
-                    and np.isclose(upper.pos[0] - upper.size[0], x - .1)
-                    and np.isclose(lower.pos[0] + lower.size[0], x + .1)):
-                raise ValueError(f"{difficulty} requires its fixed dividers and 0.8 m openings")
-            rooms.append((np.array([left, self.lower[1]]), np.array([x - .1, self.upper[1]])))
-            left = x + .1
-        rooms.append((np.array([left, self.lower[1]]), self.upper.copy()))
-        return tuple(rooms)
 
     def step(self, actions, **safety_limits):
         actions = np.clip(finite_array(actions, (self.num_agents, 2), "actions"), -1.0, 1.0)

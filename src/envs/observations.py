@@ -1,4 +1,4 @@
-"""Global-information baseline with a distinct, ego-centered view for each actor.
+"""Fixed four-agent Easy observations: 34 actor features and 33 critic features.
 
 Vectors use world-aligned XY axes. This is NOT a limited-range local sensor model.
 Other agents appear in ascending agent index, excluding the observer.
@@ -22,14 +22,6 @@ STATE_FEATURES = (
 )
 OBSERVATION_SIZE = sum(size for _, size in ACTOR_FEATURES)
 STATE_SIZE = sum(size for _, size in STATE_FEATURES)
-
-
-def feature_layout(num_agents=4):
-    actor = tuple((name, 2*(num_agents-1) if name in ("other_relative_positions", "other_velocities") else size)
-                  for name, size in ACTOR_FEATURES)
-    critic = tuple((name, 2*num_agents if name in ("agent_positions", "agent_velocities") else size)
-                   for name, size in STATE_FEATURES)
-    return actor, critic
 
 
 def build_state(physics, goal_center, goal_half_size, remaining_time, goal_hold):

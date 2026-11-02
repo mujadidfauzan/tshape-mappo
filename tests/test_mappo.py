@@ -1,4 +1,4 @@
-"""M3 behavior checks. Install requirements-training.txt to enable PyTorch tests."""
+"""PPO likelihood, gradient and checkpoint checks for the Easy learner."""
 
 from pathlib import Path
 import tempfile
@@ -12,7 +12,7 @@ except ModuleNotFoundError:
     torch = None
 
 
-@unittest.skipIf(torch is None, "install requirements-training.txt for M3 tests")
+@unittest.skipIf(torch is None, "install requirements-training.txt for MAPPO tests")
 class MAPPOTests(unittest.TestCase):
     def setUp(self):
         from src.algorithms.mappo import MAPPO

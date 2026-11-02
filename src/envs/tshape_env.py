@@ -1,89 +1,59 @@
-"""Multi-agent Easy, Medium and Hard transport using the Parallel API."""
+"""PettingZoo Parallel environment for one fixed four-agent Easy task."""
 
 from contextlib import nullcontext
 from copy import deepcopy
 
 import numpy as np
 from gymnasium import spaces
-from gymnasium.utils import seeding
 from pettingzoo import ParallelEnv
 
 from .config import load_config
-from .observations import feature_layout, build_observations, build_state
-from .diagnostics import EpisodeDiagnostics
+from .observations import OBSERVATION_SIZE, STATE_SIZE, build_observations, build_state
 from .physics import TShapePhysics, finite_array
 from .rewards import team_reward, wrapped_yaw_error
 from .termination import goal_is_settled, object_inside_goal
 
 
 class TShapeParallelEnv(ParallelEnv):
-    metadata = {"name": "tshape_easy_v1", "render_modes": ["human"],
+    metadata = {"name": "tshape_fixed_easy_v1", "render_modes": ["human"],
                 "render_fps": 20, "is_parallelizable": True}
 
-    def __init__(self, max_steps=None, frame_skip=None, render_mode=None, config=None):
+    def __init__(self, config=None, render_mode=None):
         if render_mode not in (None, "human"):
-            raise ValueError("render_mode must be None or 'human'")
-        self.config = cfg = load_config(config, max_steps=max_steps, frame_skip=frame_skip)
-        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path, cfg.num_agents)
-        self._rooms = (self.physics.transport_room_bounds(cfg.difficulty)
-                       if cfg.difficulty != "easy" else None)
-        if cfg.difficulty == "easy" and self.physics.obstacle_ids:
-            raise ValueError("internal obstacles require difficulty: medium or hard")
+            raise ValueError("render_mode must be None or human")
+        self.config = cfg = load_config(config)
+        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path)
+        self.goal_center = np.asarray(cfg.goal_center)
+        self.goal_half_size = np.asarray(cfg.goal_half_size)
+        if (np.any(self.goal_center - self.goal_half_size < self.physics.lower)
+                or np.any(self.goal_center + self.goal_half_size > self.physics.upper)):
+            raise ValueError("the complete goal rectangle must fit inside the arena")
         self.possible_agents = self.physics.agent_names.copy()
         self.agents = []
         self.max_steps = cfg.max_steps
-        self.steps = 0
-        self.goal_hold_count = 0
-        self.goal_center = np.asarray(cfg.goal_center, dtype=np.float64)
-        self.goal_half_size = np.asarray(cfg.goal_half_size, dtype=np.float64)
-        self._object_local_corners = (self.physics.object_corners()
-            - self.physics.data.xpos[self.physics.object_body, :2]) @ self.physics.rotation()
-        if (np.any(self.goal_center - self.goal_half_size < self.physics.lower)
-                or np.any(self.goal_center + self.goal_half_size > self.physics.upper)):
-            raise ValueError("goal rectangle must be entirely inside the arena")
-        if cfg.randomize_goal and np.any(
-                2 * (self.goal_half_size + cfg.arena_spawn_margin) >= self.physics.upper - self.physics.lower):
-            raise ValueError("goal rectangle and spawn margin leave no room for target randomization")
-        if not self.physics.goal_clear_of_obstacles(self.goal_center, self.goal_half_size, .005):
-            raise ValueError("goal rectangle must be clear of internal obstacles")
-        self._start_room = None
-        if self._rooms is not None:
-            for lower, upper in (self._rooms[0], self._rooms[-1]):
-                if np.any(2 * (self.goal_half_size + cfg.arena_spawn_margin) >= upper - lower):
-                    raise ValueError("goal rectangle and spawn margin must fit in either end room")
-            for side in (0, len(self._rooms) - 1):
-                lower, upper = self._rooms[side]
-                if (np.all(self.goal_center - self.goal_half_size >= lower + cfg.arena_spawn_margin)
-                        and np.all(self.goal_center + self.goal_half_size <= upper - cfg.arena_spawn_margin)):
-                    self._start_room = len(self._rooms) - 1 - side
-                    break
-            if self._start_room is None:
-                raise ValueError("fixed goal must fit entirely in an end room with the spawn margin")
         self.render_mode = render_mode
         self.viewer = None
-        self.metadata = {**type(self).metadata, "name": f"tshape_{cfg.difficulty}_v1",
-                         "render_fps": max(1, round(1 / self.physics.control_dt))}
-        actor_features, state_features = feature_layout(cfg.num_agents)
-        self.obs_dim = sum(size for _, size in actor_features)
-        self.state_space = spaces.Box(-np.inf, np.inf, shape=(sum(size for _, size in state_features),), dtype=np.float32)
-        self._action_spaces = {name: spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
-                               for name in self.possible_agents}
-        self._observation_spaces = {name: spaces.Box(-np.inf, np.inf, shape=(self.obs_dim,), dtype=np.float32)
-                                    for name in self.possible_agents}
-        self._last_state = None
-        self._last_observations = None
-        self._physics_failed = False
+        self.metadata = {**type(self).metadata, "render_fps": round(1/self.physics.control_dt)}
+        self.state_space = spaces.Box(-np.inf, np.inf, (STATE_SIZE,), np.float32)
+        self._observation_spaces = {n: spaces.Box(-np.inf, np.inf, (OBSERVATION_SIZE,), np.float32)
+                                    for n in self.possible_agents}
+        self._action_spaces = {n: spaces.Box(-1., 1., (2,), np.float32) for n in self.possible_agents}
         self._has_reset = False
-        self._metrics = {}
-        self._failure_details = None
-        # The same goal rectangle is now visible in the viewer; sites do not collide.
-        import mujoco
+        self._failed = False
+        self._last_observations = self._last_state = None
         marker = self.physics.model.site("goal")
-        self.physics.model.site_type[marker.id] = mujoco.mjtGeom.mjGEOM_BOX
-        marker.pos[:] = [*self.goal_center, 0.004]
-        marker.size[:] = [*self.goal_half_size, 0.003]
-        marker.rgba[:] = [0.1, 0.9, 0.2, 0.2]
-        mujoco.mj_forward(self.physics.model, self.physics.data)
+        marker.pos[:] = [*self.goal_center, .004]
+        marker.size[:] = [*self.goal_half_size, .003]
+        self._restore_layout()
+
+    def _restore_layout(self):
+        self.physics.reset(self.config.object_pose, self.config.agent_positions)
+        if self.physics.boundary_penetration() > 1e-9:
+            raise ValueError("fixed initial bodies must fit inside the arena")
+        if any(c.dist < -1e-9 for c in self.physics.data.contact[:self.physics.data.ncon]):
+            raise ValueError("fixed initial bodies must not overlap")
+        if self.object_inside_goal():
+            raise ValueError("the fixed initial object must start outside the target")
 
     def observation_space(self, agent):
         return self._observation_spaces[agent]
@@ -91,313 +61,128 @@ class TShapeParallelEnv(ParallelEnv):
     def action_space(self, agent):
         return self._action_spaces[agent]
 
+    def _finite(self):
+        return np.isfinite(self.physics.data.qpos).all() and np.isfinite(self.physics.data.qvel).all()
+
     def _fractions(self):
-        return (max(0.0, 1.0 - self.steps / self.max_steps),
-                min(1.0, self.goal_hold_count / self.config.success_hold_steps))
-
-    def state(self):
-        if self._last_state is not None and (self._physics_failed or not self._finite_physics()):
-            return self._last_state.copy()
-        remaining, hold = self._fractions()
-        return build_state(self.physics, self.goal_center, self.goal_half_size, remaining, hold)
-
-    def _finite_physics(self):
-        return all(np.isfinite(a).all() for a in (self.physics.data.qpos, self.physics.data.qvel))
+        return max(0., 1-self.steps/self.max_steps), min(1., self.goal_hold_count/self.config.success_hold_steps)
 
     def _observations(self):
-        if self._physics_failed or not self._finite_physics():
-            return {name: self._last_observations[name].copy() for name in self.agents}
-        remaining, hold = self._fractions()
-        observations = build_observations(self.physics, self.goal_center, self.goal_half_size,
-                                          remaining, hold)
-        return {name: observations[name] for name in self.agents}
+        if self._failed:
+            return {n: a.copy() for n, a in self._last_observations.items()}
+        return build_observations(self.physics, self.goal_center, self.goal_half_size, *self._fractions())
 
-    def _distance_to_goal(self):
+    def state(self):
+        if self._failed:
+            return self._last_state.copy()
+        return build_state(self.physics, self.goal_center, self.goal_half_size, *self._fractions())
+
+    def _distance(self):
         return float(np.linalg.norm(self.physics.get_object_state()["position"] - self.goal_center))
 
-    def _is_success(self):
-        return self.goal_hold_count >= self.config.success_hold_steps
-
-    def _spawn_positions(self, pose, randomize):
-        p = self.physics
-        if randomize:
-            return self._sample_near_object_agents()
-        if p.num_agents != 4:
-            # Deterministic diagnostics use a private seeded sampler. Restore
-            # the caller's RNG; no slots or geometry need to be duplicated.
-            previous = self.np_random
-            try:
-                self.np_random = np.random.default_rng(0)
-                return self._sample_near_object_agents()
-            finally:
-                self.np_random = previous
-        top = p.model.geom("t_horizontal")
-        stem = p.model.geom("t_vertical")
-        gap = self.config.spawn_clearance
-        # Two agents below the large bar and two beside the stem: all four
-        # start near usable contacts, independently of the scripted controller.
-        local = np.array([
-            [-0.6 * top.size[0], top.pos[1] - top.size[1] - p.radii[0] - gap],
-            [0.6 * top.size[0], top.pos[1] - top.size[1] - p.radii[1] - gap],
-            [stem.pos[0] - stem.size[0] - p.radii[2] - gap, stem.pos[1] - 0.5 * stem.size[1]],
-            [stem.pos[0] - stem.size[0] - p.radii[3] - gap, stem.pos[1] + 0.5 * stem.size[1]],
-        ])
-        c, s = np.cos(pose[2]), np.sin(pose[2])
-        return local @ np.array([[c, s], [-s, c]]) + pose[:2]
-
-    def _sample_near_object_agents(self):
-        """Sample independent exterior faces, with no assigned agent roles.
-
-        Candidate distances are measured from the actual three-box footprint,
-        not the body center or its enclosing rectangle. Hidden internal faces,
-        crowded candidates and positions beside walls are rejected.
-        """
-        p, rng, cfg = self.physics, self.np_random, self.config
-        geoms = np.asarray(p.object_geom_ids)
-        half_sizes = p.model.geom_size[geoms, :2]
-        weights = half_sizes.sum(axis=1)
-        weights /= weights.sum()
-        positions = []
-        for i, radius in enumerate(p.radii):
-            for _ in range(cfg.reset_attempts):
-                geom = int(rng.choice(geoms, p=weights))
-                half = p.model.geom_size[geom, :2]
-                axis = int(rng.choice(2, p=half[::-1] / half.sum()))
-                sign = 1 if rng.integers(0, 2) else -1
-                point = rng.uniform(-half, half)
-                point[axis] = sign * half[axis]
-                gap = rng.uniform(*cfg.agent_spawn_gap)
-                point[axis] += sign * (radius + gap)
-                rotation = p.data.geom_xmat[geom].reshape(3, 3)[:2, :2]
-                candidate = rotation @ point + p.data.geom_xpos[geom, :2]
-                margin = max(cfg.arena_spawn_margin, cfg.spawn_clearance)
-                if (np.any(candidate - radius < p.lower + margin)
-                        or np.any(candidate + radius > p.upper - margin)):
-                    continue
-                if p.agent_spawn_is_valid(candidate, i, positions, cfg.spawn_clearance):
-                    positions.append(candidate)
-                    break
-            else:
-                return None  # Retry the object pose; never fall back to arena-wide agents.
-        return np.asarray(positions)
-
-    def _sample_object_pose(self, room=None):
-        p = self.physics
-        yaw = self.np_random.uniform(*self.config.object_yaw_range)
-        c, s = np.cos(yaw), np.sin(yaw)
-        corners = self._object_local_corners @ np.array([[c, s], [-s, c]])
-        bounds = (p.lower, p.upper) if room is None else self._rooms[room]
-        lower = bounds[0] + self.config.arena_spawn_margin - corners.min(axis=0)
-        upper = bounds[1] - self.config.arena_spawn_margin - corners.max(axis=0)
-        if np.any(lower > upper):
-            raise ValueError("transported object cannot fit within the arena spawn margin")
-        if self.config.object_goal_distance_range is not None:
-            low, high = self.config.object_goal_distance_range
-            angle = self.np_random.uniform(-np.pi, np.pi)
-            radius = np.sqrt(self.np_random.uniform(low*low, high*high))
-            position = self.goal_center + radius * np.array([np.cos(angle), np.sin(angle)])
-            return np.r_[position, yaw] if np.all(position >= lower) and np.all(position <= upper) else None
-        return np.r_[self.np_random.uniform(lower, upper), yaw]
-
-    def _sample_goal(self):
-        margin = self.goal_half_size + self.config.arena_spawn_margin
-        return self.np_random.uniform(self.physics.lower + margin, self.physics.upper - margin)
-
-    def _obstacle_task_is_valid(self, clearance):
-        """Start and goal stay in opposite end rooms, crossing every divider."""
-        if self._rooms is None:
-            return True
-        corners = self.physics.object_corners()
-        lower, upper = self._rooms[self._start_room]
-        goal_lower, goal_upper = self._rooms[len(self._rooms) - 1 - self._start_room]
-        return bool(np.all(corners >= lower + clearance) and np.all(corners <= upper - clearance)
-                    and np.all(self.goal_center - self.goal_half_size >= goal_lower + clearance)
-                    and np.all(self.goal_center + self.goal_half_size <= goal_upper - clearance))
+    def object_inside_goal(self):
+        return object_inside_goal(self.physics.object_corners(), self.goal_center, self.goal_half_size)
 
     def reset(self, seed=None, options=None):
-        if seed is not None or not hasattr(self, "np_random"):
-            self.np_random, self.np_random_seed = seeding.np_random(seed)
-        # Seed action spaces too, so random-policy episodes can be replayed.
-        for name in self.possible_agents:
-            self.action_space(name).seed(int(self.np_random.integers(0, 2**32 - 1)))
-        options = {} if options is None else dict(options)
-        randomize = options.get("randomize", self.config.randomize_reset)
-        if not isinstance(randomize, bool):
-            raise ValueError("reset option 'randomize' must be a boolean")
-        explicit_pose = options.get("object_pose")
-        explicit_agents = options.get("agent_positions")
-        if explicit_pose is not None:
-            explicit_pose = finite_array(explicit_pose, (3,), "object_pose")
-        if explicit_agents is not None:
-            explicit_agents = finite_array(explicit_agents, (self.config.num_agents, 2), "agent_positions")
-        self._has_reset = False
-        self.agents = []
-        lock = self.viewer.lock() if self.viewer is not None else nullcontext()
-        with lock:
-            for _ in range(self.config.reset_attempts):
-                self.goal_center[:] = (self._sample_goal() if randomize and self.config.randomize_goal
-                                       else self.config.goal_center)
-                self.physics.model.site("goal").pos[:2] = self.goal_center
-                if explicit_pose is not None:
-                    pose = explicit_pose.copy()
-                elif randomize:
-                    pose = self._sample_object_pose(self._start_room)
-                else:
-                    pose = np.r_[self.physics.model.body_pos[self.physics.object_body, :2], 0.0]
-                if pose is None:
-                    continue
-                # Synchronize object geometry before sampling nearby agent surfaces.
-                # No physics step occurs with the provisional XML agent positions.
-                self.physics.reset(pose)
-                positions = explicit_agents if explicit_agents is not None else self._spawn_positions(pose, randomize)
-                if positions is None:
-                    continue
-                self.physics.reset(pose, positions)
-                if randomize and (self._distance_to_goal() < self.config.minimum_goal_distance or self.object_inside_goal()):
-                    continue
-                # Reserve a small positive margin even when noise is disabled.
-                clearance = max(0.005, self.config.spawn_clearance) if randomize else 0.005
-                if (self._obstacle_task_is_valid(clearance)
-                        and self.physics.goal_clear_of_obstacles(self.goal_center, self.goal_half_size, clearance)
-                        and self.physics.spawn_is_valid(clearance=clearance)):
-                    break
-                if not randomize or (explicit_pose is not None and explicit_agents is not None):
-                    raise ValueError("requested reset overlaps a wall or body, or violates opposite-room placement")
-            else:
-                raise ValueError("could not sample a valid reset; check geometry, margins and goal separation")
-            self.steps = 0
-            self.goal_hold_count = 0
+        # Parallel API accepts an options mapping. It never changes this layout.
+        if seed is not None:
+            if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+                raise ValueError("seed must be a nonnegative integer")
+            for i, name in enumerate(self.possible_agents):
+                self.action_space(name).seed(seed+i)
+        with self.viewer.lock() if self.viewer is not None else nullcontext():
+            self._restore_layout()
             self.agents = self.possible_agents.copy()
-            self._metrics = {"episode_return": 0.0, "object_path_length_m": 0.0,
-                             "control_effort_N2_s": 0.0, "wall_collision_events": 0,
-                             "wall_contact_physics_steps": 0, "max_penetration_m": 0.0}
-            self._last_state = None
-            self._last_observations = None
-            self._physics_failed = False
+            self.steps = self.goal_hold_count = 0
+            self._failed = False
             self._failure_details = None
-            self._episode_diagnostics = EpisodeDiagnostics(self.physics, self.goal_center, self.goal_half_size)
-            positions, _ = self.physics.get_agents_state()
+            self._metrics = dict(episode_return=0., object_path_length_m=0., control_effort_N2_s=0.,
+                                 wall_collision_events=0, max_penetration_m=0., inside_goal_steps=0,
+                                 agent_object_contact_time_s=[0.]*4)
             obj = self.physics.get_object_state()
-            self._initial_state = {"goal_center": self.goal_center.tolist(),
-                "goal_yaw": self.config.goal_yaw,
-                "object_position": obj["position"].tolist(), "object_yaw": obj["yaw"],
-                "agent_positions": positions.tolist(), "reset_distribution": self.config.reset_distribution,
-                "randomized": randomize, "goal_randomized": bool(randomize and self.config.randomize_goal),
-                "difficulty": self.config.difficulty}
-            self._initial_state["num_agents"] = self.config.num_agents
-            observations = self._observations()
-            self._last_observations = {name: obs.copy() for name, obs in observations.items()}
+            self._initial_state = dict(object_position=obj["position"].tolist(), object_yaw=obj["yaw"],
+                                       agent_positions=self.physics.get_agents_state()[0].tolist(),
+                                       goal_center=self.goal_center.tolist(), goal_yaw=self.config.goal_yaw)
+            obs = self._observations()
+            self._last_observations = {n: a.copy() for n, a in obs.items()}
             self._last_state = self.state()
             self._has_reset = True
-            info = self._info(False, True, 0.0, {}, None, None)
-        if self.viewer is not None and self.viewer.is_running():
-            self.viewer.sync()  # sync obtains its own lock
-        return observations, {name: self._copy_info(info) for name in self.agents}
+            info = self._info(False, {}, None, None)
+        return obs, {n: deepcopy(info) for n in self.agents}
 
-    @staticmethod
-    def _copy_info(info):
-        return {**info, "reward_components": info["reward_components"].copy(),
-                "failure_details": deepcopy(info["failure_details"]),
-                "initial_state": deepcopy(info.get("initial_state")),
-                "diagnostics": deepcopy(info["diagnostics"]),
-                "episode_metrics": info["episode_metrics"].copy()}
-
-    def _info(self, success, stable, progress, components, end_reason, failure_reason):
-        distance = self._distance_to_goal() if self._finite_physics() else None
-        if distance is not None and not np.isfinite(distance):
-            distance = None
-        elapsed = float(self.physics.data.time) if np.isfinite(self.physics.data.time) else None
-        orientation_error = (abs(wrapped_yaw_error(self.physics.get_object_state()["yaw"], self.config.goal_yaw))
-                             if self._finite_physics() else None)
-        return {"success": bool(success), "stable": bool(stable), "distance_to_goal": distance,
-                "goal_yaw": self.config.goal_yaw, "orientation_error_rad": orientation_error,
-                "difficulty": self.config.difficulty,
-                "num_agents": self.config.num_agents,
-                "diagnostics": self._episode_diagnostics.report(success, stable, end_reason is not None),
-                "progress": float(progress), "episode_step": self.steps,
-                "elapsed_time_s": elapsed, "completion_time_s": elapsed if success else None,
-                "goal_hold_steps": self.goal_hold_count, "end_reason": end_reason,
-                "failure_reason": failure_reason, "reward_components": components,
-                "failure_details": self._failure_details,
-                "goal_center": self.goal_center.tolist(),
-                "initial_state": self._initial_state if self.steps == 0 or end_reason is not None else None,
-                "episode_metrics": self._metrics.copy()}
+    def _info(self, success, components, reason, failure_reason):
+        finite = self._finite()
+        obj = self.physics.get_object_state() if finite else None
+        return dict(
+            success=bool(success), stable=not self._failed, episode_step=self.steps,
+            elapsed_time_s=float(self.physics.data.time) if np.isfinite(self.physics.data.time) else None,
+            completion_time_s=float(self.physics.data.time) if success else None,
+            distance_to_goal=self._distance() if finite else None,
+            orientation_error_rad=abs(wrapped_yaw_error(obj["yaw"], self.config.goal_yaw)) if finite else None,
+            goal_hold_steps=self.goal_hold_count, end_reason=reason, failure_reason=failure_reason,
+            reward_components=components.copy(), episode_metrics=deepcopy(self._metrics),
+            initial_state=deepcopy(self._initial_state) if self.steps == 0 or reason else None,
+            failure_details=deepcopy(self._failure_details),
+        )
 
     def step(self, actions):
         if not self._has_reset:
             raise RuntimeError("call reset() before step()")
         if not self.agents:
             return {}, {}, {}, {}, {}
-        current_agents = self.agents.copy()
-        if set(actions) != set(current_agents):
-            raise ValueError("actions must be provided for all and only live agents")
-        action_array = finite_array([actions[name] for name in current_agents], (self.config.num_agents, 2), "actions")
-        previous_distance = self._distance_to_goal() if self._finite_physics() else 0.0
-        previous_error = self._episode_diagnostics.error
+        names = self.agents.copy()
+        if set(actions) != set(names):
+            raise ValueError("provide one action for each live agent")
+        array = finite_array([actions[n] for n in names], (4, 2), "actions")
+        previous = self._distance() if self._finite() else 0.
+        cfg = self.config
         with self.viewer.lock() if self.viewer is not None else nullcontext():
-            report = self.physics.step(
-                action_array, max_penetration=self.config.max_penetration,
-                max_linear_speed=self.config.max_linear_speed,
-                max_angular_speed=self.config.max_angular_speed,
-            )
+            report = self.physics.step(array, max_penetration=cfg.max_penetration,
+                                       max_linear_speed=cfg.max_linear_speed,
+                                       max_angular_speed=cfg.max_angular_speed)
             self.steps += 1
-            stable = report["stable"]
+            self._failed = not report["stable"]
             self._failure_details = report["failure_details"]
-            self._physics_failed = not stable
-            if stable:
-                settled = goal_is_settled(self.physics, self.goal_center, self.goal_half_size,
-                                         self.config.success_linear_speed, self.config.success_angular_speed)
-                self._episode_diagnostics.update(self.physics, self.steps, self.object_inside_goal(), settled,
-                                                report["agent_object_contact_time_s"])
-            else:
-                self._episode_diagnostics.contact_time += report["agent_object_contact_time_s"]
-            if stable and goal_is_settled(self.physics, self.goal_center, self.goal_half_size,
-                                          self.config.success_linear_speed, self.config.success_angular_speed):
-                self.goal_hold_count += 1
-            else:
-                self.goal_hold_count = 0
-            success = stable and self._is_success()
-            terminated = success or not stable
+            settled = (not self._failed and goal_is_settled(
+                self.physics, self.goal_center, self.goal_half_size,
+                cfg.success_linear_speed, cfg.success_angular_speed))
+            self.goal_hold_count = self.goal_hold_count + 1 if settled else 0
+            success = not self._failed and self.goal_hold_count >= cfg.success_hold_steps
+            terminated = success or self._failed
             truncated = self.steps >= self.max_steps and not terminated
-            distance = self._distance_to_goal() if self._finite_physics() else previous_distance
-            reward, progress, components = team_reward(previous_distance, distance, success,
-                not stable, self.config, previous_error, self._episode_diagnostics.error,
-                yaw=self.physics.get_object_state()["yaw"] if stable else None)
+            distance = self._distance() if self._finite() else previous
+            yaw = self.physics.get_object_state()["yaw"] if not self._failed else 0.
+            reward, parts = team_reward(previous, distance, yaw, success, self._failed, cfg)
             self._metrics["episode_return"] += reward
-            for key in ("object_path_length_m", "control_effort_N2_s", "wall_collision_events",
-                        "wall_contact_physics_steps"):
+            for key in ("object_path_length_m", "control_effort_N2_s", "wall_collision_events"):
                 self._metrics[key] += report[key]
             self._metrics["max_penetration_m"] = max(self._metrics["max_penetration_m"], report["max_penetration_m"])
-            observations = self._observations()
-            if stable:
-                self._last_observations = {name: obs.copy() for name, obs in observations.items()}
+            self._metrics["agent_object_contact_time_s"] = (
+                np.asarray(self._metrics["agent_object_contact_time_s"]) + report["agent_object_contact_time_s"]).tolist()
+            if not self._failed:
+                self._metrics["inside_goal_steps"] += int(self.object_inside_goal())
+            obs = self._observations()
+            if not self._failed:
+                self._last_observations = {n: a.copy() for n, a in obs.items()}
                 self._last_state = self.state()
-            reason = "success" if success else "physics_failure" if not stable else "time_limit" if truncated else None
-            info = self._info(success, stable, progress, components, reason, report["failure_reason"])
-            rewards = {name: reward for name in current_agents}
-            terminations = {name: bool(terminated) for name in current_agents}
-            truncations = {name: bool(truncated) for name in current_agents}
-            infos = {name: self._copy_info(info) for name in current_agents}
+            reason = "success" if success else "physics_failure" if self._failed else "time_limit" if truncated else None
+            info = self._info(success, parts, reason, report["failure_reason"])
             if terminated or truncated:
                 self.agents = []
-        return observations, rewards, terminations, truncations, infos
-
-    def object_inside_goal(self):
-        return object_inside_goal(self.physics.object_corners(), self.goal_center, self.goal_half_size)
+        return (obs, dict.fromkeys(names, reward), dict.fromkeys(names, bool(terminated)),
+                dict.fromkeys(names, bool(truncated)), {n: deepcopy(info) for n in names})
 
     def render(self):
         if self.render_mode != "human":
             return None
-        import mujoco
-        import mujoco.viewer as mj_viewer
         if self.viewer is None:
-            self.viewer = mj_viewer.launch_passive(self.physics.model, self.physics.data)
-            with self.viewer.lock():
-                self.viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-                self.viewer.cam.fixedcamid = self.physics.model.camera("top_view").id
-        if self.viewer.is_running():
-            self.viewer.sync()
-        return None
+            import mujoco.viewer
+            self.viewer = mujoco.viewer.launch_passive(self.physics.model, self.physics.data)
+            self.viewer.cam.lookat[:] = [0, 0, 0]
+            self.viewer.cam.distance = 8
+            self.viewer.cam.azimuth = 90
+            self.viewer.cam.elevation = -90
+        self.viewer.sync()
 
     def close(self):
         if self.viewer is not None:

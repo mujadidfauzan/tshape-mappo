@@ -1,4 +1,4 @@
-# M3 implementation baseline; tune only after smoke checks pass.
+# Fixed Easy only. Budgets count joint environment timesteps.
 seed: 42
 device: cpu
 total_steps: 100000
@@ -20,20 +20,15 @@ target_kl: 0.03
 initial_log_std: -0.5
 normalize_inputs: true
 normalization_clip: 10.0
-# Step thresholds are checked after each PPO update (at rollout boundaries).
-checkpoint_interval_steps: 10000
-eval_interval_steps: 50000
-eval_episodes: 5
-eval_seed: 100000
 torch_threads: 1
-# One deterministic evaluation video per 100,000 team environment steps.
-# Set the interval to 0 to disable automatic video recording.
+
+# The deterministic layout needs only one deterministic episode per check.
+eval_interval_steps: 10000
+checkpoint_interval_steps: 10000
 video_interval_steps: 100000
 video_width: 1920
 video_height: 1080
 video_crf: 18
 tensorboard: true
 stats_window_size: 100
-# Sample raw per-step reward every 100 steps; use 1 to log every timestep.
-# Rollout means/component means always include every transition.
 reward_log_interval_steps: 100

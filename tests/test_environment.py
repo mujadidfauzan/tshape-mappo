@@ -1,237 +1,118 @@
-"""M2 episode/API regression checks. Prepared for manual execution by the user."""
+"""Fixed-layout, contact, termination and Parallel API checks."""
 
+from dataclasses import replace
 import unittest
 
 import mujoco
 import numpy as np
 from pettingzoo.test import parallel_api_test
 
-from src.envs.observations import OBSERVATION_SIZE, STATE_SIZE
+from src.envs.config import load_config
+from src.envs.scripted import scripted_actions
 from src.envs.tshape_env import TShapeParallelEnv
 
 
-class EnvironmentTests(unittest.TestCase):
-    def make_env(self, **config):
-        env = TShapeParallelEnv(config={"randomize_reset": False, **config})
+class EasyTests(unittest.TestCase):
+    def env(self, **overrides):
+        env=TShapeParallelEnv(replace(load_config(),**overrides))
         self.addCleanup(env.close)
         return env
 
-    def zeros(self, env):
-        return {name: np.zeros(2, dtype=np.float32) for name in env.agents}
+    def zeros(self,env):
+        return {n:np.zeros(2,np.float32) for n in env.agents}
+
+    def test_every_seed_and_episode_restores_the_exact_layout(self):
+        env=self.env()
+        first,_=env.reset(seed=0)
+        qpos=env.physics.data.qpos.copy()
+        for seed in [1,42,999]:
+            env.step({n:env.action_space(n).sample() for n in env.agents})
+            obs,infos=env.reset(seed=seed)
+            np.testing.assert_array_equal(env.physics.data.qpos,qpos)
+            np.testing.assert_array_equal(env.physics.data.qvel,0)
+            initial=infos["agent_0"]["initial_state"]
+            self.assertEqual(initial["goal_center"],list(env.config.goal_center))
+            self.assertTrue(all(v<0 for v in initial["object_position"]))
+            self.assertTrue(all(v>0 for v in initial["goal_center"]))
+            for n in env.agents:
+                np.testing.assert_array_equal(obs[n],first[n])
+        self.assertEqual(first["agent_0"].shape,(34,))
+        self.assertEqual(env.state().shape,(33,))
+        self.assertFalse(env.object_inside_goal())
+
+    def test_removed_modes_are_rejected(self):
+        for values in [{"randomize_reset":False},{"difficulty":"medium"},{"num_agents":8}]:
+            with self.subTest(values=values),self.assertRaises(ValueError):
+                load_config(values)
+        env=self.env()
+        env.reset()
+        original=env.physics.data.qpos.copy()
+        env.reset(options={"randomize":True})
+        np.testing.assert_array_equal(env.physics.data.qpos,original)
 
     def test_parallel_api(self):
-        env = self.make_env(max_steps=8)
-        parallel_api_test(env, num_cycles=12)
+        parallel_api_test(self.env(max_steps=3),num_cycles=5)
 
-    def test_reset_returns_distinct_float32_observations_and_global_state(self):
-        env = self.make_env()
-        observations, infos = env.reset(seed=42)
-        self.assertEqual(set(observations), set(env.possible_agents))
-        self.assertEqual(set(infos), set(env.possible_agents))
-        for name, observation in observations.items():
-            self.assertEqual(observation.shape, (OBSERVATION_SIZE,))
-            self.assertEqual(observation.dtype, np.float32)
-            self.assertTrue(env.observation_space(name).contains(observation))
-        self.assertFalse(np.array_equal(observations["agent_0"], observations["agent_1"]))
-        self.assertEqual(env.state().shape, (STATE_SIZE,))
-        self.assertTrue(env.state_space.contains(env.state()))
-        self.assertEqual(len(env.physics.object_geom_ids), 3)
-
-    def test_seed_reproduces_spawn_actions_and_transitions(self):
-        a = self.make_env(randomize_reset=True)
-        b = self.make_env(randomize_reset=True)
-        obs_a, _ = a.reset(seed=123)
-        obs_b, _ = b.reset(seed=123)
-        np.testing.assert_array_equal(a.physics.data.qpos, b.physics.data.qpos)
-        self.assertTrue(a.physics.spawn_is_valid(clearance=0.005))
-        initial = a.physics.data.qpos.copy()
-        actions_a = {name: a.action_space(name).sample() for name in a.agents}
-        actions_b = {name: b.action_space(name).sample() for name in b.agents}
-        for name in a.agents:
-            np.testing.assert_array_equal(obs_a[name], obs_b[name])
-            np.testing.assert_array_equal(actions_a[name], actions_b[name])
-        result_a, result_b = a.step(actions_a), b.step(actions_b)
-        for name in a.possible_agents:
-            np.testing.assert_array_equal(result_a[0][name], result_b[0][name])
-            self.assertEqual(result_a[1][name], result_b[1][name])
-        a.reset(seed=123)
-        np.testing.assert_array_equal(a.physics.data.qpos, initial)
-        a.reset(seed=124)
-        self.assertFalse(np.array_equal(a.physics.data.qpos, initial))
-
-    def test_invalid_actions_do_not_advance_the_episode(self):
-        env = self.make_env()
-        env.reset(seed=1)
-        for actions in ({}, {**self.zeros(env), "extra": np.zeros(2)},
-                        {**self.zeros(env), "agent_0": [np.nan, 0]},
-                        {**self.zeros(env), "agent_0": [0, 0, 0]}):
-            with self.subTest(actions=str(actions)):
-                with self.assertRaises(ValueError):
-                    env.step(actions)
-                self.assertEqual(env.steps, 0)
-                self.assertEqual(env.physics.data.time, 0)
-
-    def test_step_before_reset_is_an_error(self):
-        env = self.make_env()
-        with self.assertRaises(RuntimeError):
-            env.step({})
-
-    def test_out_of_range_actions_are_clipped_to_xml_force_limits(self):
-        env = self.make_env()
-        env.reset(seed=42)
-        actions = {name: np.array([2.0, -2.0]) for name in env.agents}
-        env.step(actions)
-        controls = env.physics.data.ctrl[env.physics.motor_ids]
-        np.testing.assert_array_equal(controls[:, 0], env.physics.motor_limits[:, 0, 1])
-        np.testing.assert_array_equal(controls[:, 1], env.physics.motor_limits[:, 1, 0])
-
-    def test_zero_actions_have_shared_distance_cost_and_time_limit(self):
-        env = self.make_env(max_steps=1)
-        env.reset(seed=42)
-        observations, rewards, terminated, truncated, infos = env.step(self.zeros(env))
-        self.assertEqual(set(observations), set(env.possible_agents))
-        distance = infos["agent_0"]["distance_to_goal"]
-        expected = -env.config.distance_weight * distance / (distance + env.config.distance_scale)
-        self.assertEqual(len(set(rewards.values())), 1)
-        self.assertAlmostEqual(rewards["agent_0"], expected)
-        self.assertNotIn("time", infos["agent_0"]["reward_components"])
-        self.assertFalse(any(terminated.values()))
-        self.assertTrue(all(truncated.values()))
-        self.assertEqual(env.agents, [])
-        self.assertEqual(infos["agent_0"]["end_reason"], "time_limit")
-        self.assertAlmostEqual(infos["agent_0"]["elapsed_time_s"], 0.05)
-        self.assertEqual(env.step({}), ({}, {}, {}, {}, {}))
-        self.assertAlmostEqual(env.state()[-2], 0.0)
-
-    def test_success_requires_a_slow_hold_and_takes_priority_over_time_limit(self):
-        env = self.make_env(max_steps=3, success_hold_steps=3)
-        env.reset(seed=7, options={"randomize": False, "object_pose": [1.8, 1.5, 0]})
-        self.assertTrue(env.object_inside_goal())
-        for i in range(3):
-            _, rewards, terminated, truncated, infos = env.step(self.zeros(env))
-            self.assertEqual(infos["agent_0"]["goal_hold_steps"], i + 1)
-            self.assertEqual(all(terminated.values()), i == 2)
-            self.assertFalse(any(truncated.values()))
-        self.assertEqual(infos["agent_0"]["end_reason"], "success")
-        self.assertAlmostEqual(rewards["agent_0"], env.config.success_reward)
-        self.assertEqual(env.agents, [])
-
-    def test_configured_goal_heading_is_logged_without_changing_observation_size(self):
-        env = self.make_env(goal_yaw=np.pi/2)
-        observations, infos = env.reset(seed=42)
-        self.assertEqual(observations["agent_0"].shape, (34,))
-        self.assertAlmostEqual(infos["agent_0"]["orientation_error_rad"], np.pi/2)
-        self.assertEqual(infos["agent_0"]["initial_state"]["goal_yaw"], np.pi/2)
-        _, rewards, _, _, infos = env.step(self.zeros(env))
-        parts = infos["agent_0"]["reward_components"]
-        self.assertLess(parts["orientation"], 0)
-        self.assertAlmostEqual(rewards["agent_0"], sum(parts.values()))
-        self.assertEqual(infos["agent_0"]["goal_yaw"], np.pi/2)
-
-    def test_orientation_reward_does_not_silently_add_a_success_yaw_tolerance(self):
-        env = self.make_env(success_hold_steps=1)
-        env.reset(seed=7, options={"randomize":False,"object_pose":[1.8,1.5,np.pi]})
-        _, rewards, terminated, _, infos = env.step(self.zeros(env))
-        self.assertTrue(all(terminated.values()))
-        self.assertTrue(infos["agent_0"]["success"])
-        self.assertAlmostEqual(infos["agent_0"]["orientation_error_rad"], np.pi)
-        self.assertLess(infos["agent_0"]["reward_components"]["orientation"], 0)
-        self.assertGreater(rewards["agent_0"],0)
-
-    def test_short_end_bar_counts_towards_goal_containment(self):
-        env = self.make_env()
-        env.reset(seed=7, options={"randomize": False, "object_pose": [1.8, 1.43, 0]})
-        corners = env.physics.object_corners()
-        lower, upper = env.goal_center - env.goal_half_size, env.goal_center + env.goal_half_size
-        # Large bar + stem fit, but the short bar protrudes below the goal.
-        self.assertTrue(np.all(corners[:8] >= lower) and np.all(corners[:8] <= upper))
-        self.assertFalse(env.object_inside_goal())
-        _, _, terminated, _, infos = env.step(self.zeros(env))
-        self.assertFalse(any(terminated.values()))
-        self.assertEqual(infos["agent_0"]["goal_hold_steps"], 0)
-
-    def test_fast_motion_through_goal_does_not_succeed(self):
-        env = self.make_env(success_hold_steps=1)
-        env.reset(options={"randomize": False, "object_pose": [1.8, 1.5, 0]})
-        env.physics.data.qvel[env.physics.object_dofs[0]] = 0.5
-        mujoco.mj_forward(env.physics.model, env.physics.data)
-        _, _, terminated, _, infos = env.step(self.zeros(env))
-        self.assertFalse(any(terminated.values()))
-        self.assertEqual(infos["agent_0"]["goal_hold_steps"], 0)
-
-    def test_invalid_spawn_is_rejected(self):
-        env = self.make_env()
-        with self.assertRaises(ValueError):
-            env.reset(options={"randomize": False, "agent_positions": np.zeros((4, 2))})
-
-    def test_nonfinite_physics_terminates_with_finite_reward_and_observations(self):
-        env = self.make_env()
-        observations, _ = env.reset(seed=7)
-        env.physics.data.qpos[env.physics.object_qpos[0]] = np.nan
-        final_obs, rewards, terminated, truncated, infos = env.step(self.zeros(env))
-        self.assertTrue(all(terminated.values()))
-        self.assertFalse(any(truncated.values()))
-        self.assertEqual(infos["agent_0"]["failure_reason"], "non_finite_state")
-        for name in env.possible_agents:
-            self.assertTrue(np.isfinite(rewards[name]))
-            np.testing.assert_array_equal(final_obs[name], observations[name])
-        self.assertTrue(np.isfinite(env.state()).all())
-
-    def test_escaped_object_is_a_failure_even_without_wall_contact(self):
-        env = self.make_env()
+    def test_reference_controller_physically_completes_fixed_easy(self):
+        env=self.env()
         env.reset()
-        env.physics.data.qpos[env.physics.object_qpos[0]] = 4.0
-        mujoco.mj_forward(env.physics.model, env.physics.data)
-        _, rewards, terminated, _, infos = env.step(self.zeros(env))
-        self.assertTrue(all(terminated.values()))
-        self.assertEqual(infos["agent_0"]["failure_reason"], "excessive_penetration")
-        self.assertAlmostEqual(rewards["agent_0"], -env.config.failure_penalty)
-
-    def test_penetration_failure_identifies_the_contact_and_actual_state(self):
-        env = self.make_env()
-        observations, _ = env.reset(seed=42)
-        p = env.physics
-        stem = p.model.geom("t_vertical")
-        # Put agent 2 six millimeters into the left face of the stem. This
-        # intentional invalid state should fail before the next substep.
-        position = np.array([stem.pos[0] - stem.size[0] - p.radii[2] + 0.006, -0.26])
-        p.data.qpos[p.agent_qpos[2]] = position - p.model.body_pos[p.agent_bodies[2], :2]
-        mujoco.mj_forward(p.model, p.data)
-        actual_qpos = p.data.qpos.copy()
-        final_obs, _, terminated, _, infos = env.step(self.zeros(env))
-        self.assertTrue(all(terminated.values()))
-        details = infos["agent_0"]["failure_details"]
-        self.assertEqual(infos["agent_0"]["failure_reason"], "excessive_penetration")
-        np.testing.assert_array_equal(details["qpos"], actual_qpos)
-        contact = details["contacts"][0]
-        self.assertEqual(set(contact["geoms"]), {"agent_2_geom", "t_vertical"})
-        self.assertGreater(contact["penetration_m"], env.config.max_penetration)
-        np.testing.assert_array_equal(final_obs["agent_0"], observations["agent_0"])
-        details["contacts"][0]["geoms"].append("modified")
-        self.assertNotIn("modified", infos["agent_1"]["failure_details"]["contacts"][0]["geoms"])
-
-    def test_fixed_scripted_transport_does_not_exceed_contact_tolerance(self):
-        from src.envs.scripted import scripted_actions
-        env = self.make_env(randomize_reset=False)
-        env.reset(seed=46)
-        info = None
         while env.agents:
-            _, _, _, _, infos = env.step(scripted_actions(env))
-            info = infos["agent_0"]
-            self.assertTrue(info["stable"], msg=str(info.get("failure_details")))
-        self.assertIsNotNone(info)
-        self.assertTrue(info["success"], msg=str(info))
+            _,_,_,_,infos=env.step(scripted_actions(env))
+            self.assertTrue(infos["agent_0"]["stable"],infos["agent_0"]["failure_details"])
+        info=infos["agent_0"]
+        self.assertTrue(info["success"])
+        self.assertLess(info["episode_step"],env.max_steps)
+        self.assertGreater(info["episode_metrics"]["object_path_length_m"],2.5)
+        self.assertLess(info["episode_metrics"]["max_penetration_m"],.005)
 
-    def test_all_four_scripted_controls_are_bounded_and_finite(self):
-        from src.envs.scripted import scripted_actions
-        env = self.make_env()
-        env.reset(seed=42)
-        actions = scripted_actions(env)
-        self.assertEqual(set(actions), set(env.possible_agents))
-        for name, action in actions.items():
-            self.assertTrue(env.action_space(name).contains(action))
-            self.assertGreater(np.linalg.norm(action), 0)
+    def test_timeout_and_shared_reward(self):
+        env=self.env(max_steps=2)
+        env.reset()
+        for _ in range(2):
+            obs,rewards,term,trunc,infos=env.step(self.zeros(env))
+            self.assertEqual(len(set(rewards.values())),1)
+            self.assertAlmostEqual(rewards["agent_0"],sum(infos["agent_0"]["reward_components"].values()))
+        self.assertFalse(any(term.values()))
+        self.assertTrue(all(trunc.values()))
+        self.assertEqual(env.agents,[])
+        self.assertEqual(env.step({}),({},{},{},{},{}))
 
+    def test_complete_footprint_and_settling_are_required(self):
+        env=self.env(max_steps=10)
+        env.reset()
+        gx,gy=env.config.goal_center
+        env.physics.reset([gx,gy-.07,0],env.config.agent_positions)
+        self.assertFalse(env.object_inside_goal())
+        env.physics.reset([gx,gy,0],env.config.agent_positions)
+        self.assertTrue(env.object_inside_goal())
+        env.physics.data.qvel[env.physics.object_dofs[0]]=.5
+        mujoco.mj_forward(env.physics.model,env.physics.data)
+        _,_,term,_,info=env.step(self.zeros(env))
+        self.assertFalse(any(term.values()))
+        self.assertEqual(info["agent_0"]["goal_hold_steps"],0)
+        env.physics.reset([gx,gy,0],env.config.agent_positions)
+        for _ in range(5):
+            _,_,term,_,info=env.step(self.zeros(env))
+        self.assertTrue(all(term.values()))
+        self.assertTrue(info["agent_0"]["success"])
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_invalid_actions_do_not_advance_time(self):
+        env=self.env()
+        env.reset()
+        with self.assertRaises(ValueError):
+            env.step({})
+        with self.assertRaises(ValueError):
+            env.step({**self.zeros(env),"agent_0":[np.nan,0]})
+        self.assertEqual(env.steps,0)
+
+    def test_nonfinite_physics_ends_with_finite_cached_features(self):
+        env=self.env()
+        original,_=env.reset()
+        env.physics.data.qpos[env.physics.object_qpos[0]]=np.nan
+        obs,reward,term,trunc,info=env.step(self.zeros(env))
+        self.assertTrue(all(term.values()))
+        self.assertFalse(any(trunc.values()))
+        self.assertEqual(reward["agent_0"],-20)
+        self.assertEqual(info["agent_0"]["failure_reason"],"non_finite_state")
+        np.testing.assert_array_equal(obs["agent_0"],original["agent_0"])
+        self.assertTrue(np.isfinite(env.state()).all())

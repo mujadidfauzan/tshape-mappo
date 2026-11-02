@@ -1,4 +1,4 @@
-"""On-policy transitions: one team value/reward and four actor samples per step."""
+"""On-policy transitions: one team value/reward and one actor row per agent."""
 
 import numpy as np
 

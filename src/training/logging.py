@@ -1,4 +1,4 @@
-"""Rolling episode statistics and TensorBoard scalars indexed by team steps."""
+"""A rolling episode window and TensorBoard logging for fixed Easy."""
 
 from collections import deque
 import math
@@ -11,37 +11,21 @@ class EpisodeStats:
         self.records = deque(records, maxlen=window_size)
 
     def add(self, info):
-        metrics = info["episode_metrics"]
-        self.records.append({
-            "ep_rew_mean": float(metrics["episode_return"]),
-            "ep_len_mean": int(info["episode_step"]),
-            "success_rate": float(info["success"]),
-            "stable_rate": float(info["stable"]),
-            "distance_to_goal_mean": info["distance_to_goal"],
-            "orientation_error_rad_mean": info.get("orientation_error_rad"),
-            "object_path_length_mean_m": float(metrics["object_path_length_m"]),
-            "wall_collision_events_mean": float(metrics["wall_collision_events"]),
-            "control_effort_mean_N2_s": float(metrics["control_effort_N2_s"]),
-            "max_penetration_mean_m": float(metrics["max_penetration_m"]),
-            "completion_time_mean_s": info["completion_time_s"],
-        })
-        diagnostics = info.get("diagnostics", {})
-        for name in ("footprint_error_m", "footprint_margin_m", "gate_clear_fraction"):
-            if name in diagnostics:
-                self.records[-1][name + "_mean"] = diagnostics[name]
-        if diagnostics:
-            for category in ("gate_blocked", "gate_not_reached", "contact_lost", "goal_not_settled",
-                             "goal_footprint_outside", "physics_failure"):
-                self.records[-1][category + "_rate"] = float(diagnostics.get("failure_category") == category)
+        m = info["episode_metrics"]
+        self.records.append(dict(ep_rew_mean=m["episode_return"], ep_len_mean=info["episode_step"],
+                                 success_rate=float(info["success"]), stable_rate=float(info["stable"]),
+                                 distance_to_goal_mean=info["distance_to_goal"],
+                                 orientation_error_rad_mean=info["orientation_error_rad"],
+                                 inside_goal_steps_mean=m["inside_goal_steps"],
+                                 object_path_length_m_mean=m["object_path_length_m"]))
 
     def summary(self):
         result = {"window_episodes": len(self.records)}
-        if not self.records:
-            return result
-        for key in self.records[-1]:
-            values = [r[key] for r in self.records if r.get(key) is not None and math.isfinite(r[key])]
-            if values:
-                result[key] = sum(values) / len(values)
+        if self.records:
+            for key in self.records[-1]:
+                values = [r[key] for r in self.records if r[key] is not None and math.isfinite(r[key])]
+                if values:
+                    result[key] = sum(values)/len(values)
         return result
 
     def state_dict(self):
@@ -53,27 +37,18 @@ class RunLogger:
         self.writer = None
         self.reward_interval = reward_interval
         if enabled:
-            try:
-                from torch.utils.tensorboard import SummaryWriter
-            except ImportError as error:
-                raise RuntimeError("TensorBoard is missing; install requirements-training.txt "
-                                   "or use --no-tensorboard") from error
-            self.writer = SummaryWriter(log_dir=str(Path(run_dir) / "tensorboard"), flush_secs=10)
+            from torch.utils.tensorboard import SummaryWriter
+            self.writer = SummaryWriter(str(Path(run_dir)/"tensorboard"), flush_secs=10)
 
     def scalars(self, prefix, values, step):
-        if self.writer is None:
-            return
-        for name, value in values.items():
-            if isinstance(value, Real) and math.isfinite(value):
-                self.writer.add_scalar(f"{prefix}/{name}", value, global_step=step)
-
-    def reward(self, reward, step):
-        if self.writer is not None and self.reward_interval and step % self.reward_interval == 0:
-            self.writer.add_scalar("reward/step", reward, global_step=step)
-
-    def flush(self):
         if self.writer is not None:
-            self.writer.flush()
+            for key, value in values.items():
+                if isinstance(value, Real) and math.isfinite(value):
+                    self.writer.add_scalar(f"{prefix}/{key}", value, step)
+
+    def reward(self, value, step):
+        if self.writer is not None and self.reward_interval and step % self.reward_interval == 0:
+            self.writer.add_scalar("reward/step", value, step)
 
     def close(self):
         if self.writer is not None:

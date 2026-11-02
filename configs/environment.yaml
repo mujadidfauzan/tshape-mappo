@@ -1,41 +1,30 @@
-# Independent policies support 2, 4, 8 or 16 agents.
-num_agents: 4
-# M2 Easy baseline. Geometry, mass, damping and motor limits stay in the XML.
+# One fixed Easy scenario; every reset uses these exact coordinates.
 model_path: assets/mujoco/arena.xml
-# 50 substeps x 1 ms keeps the policy interval at 50 ms (20 Hz).
 frame_skip: 50
 max_steps: 500
-
-# The entire transported object must fit and remain slow for these steps.
-goal_center: [1.8, 1.5]
+object_pose: [-1.5, -1.5, 0.0]
+agent_positions:
+  - [-1.68, -1.05]
+  - [-1.32, -1.05]
+  - [-1.61, -1.76]
+  - [-1.61, -1.24]
+goal_center: [1.5, 1.5]
 goal_half_size: [0.75, 0.65]
+goal_yaw: 0.0
 success_linear_speed: 0.05
 success_angular_speed: 0.1
 success_hold_steps: 5
 
-# Object/goal randomization stays broad; agents spawn randomly near the object.
-randomize_reset: true
-reset_distribution: near_object
-# Random surface-to-surface gap between each agent and the object, in meters.
-agent_spawn_gap: [0.04, 0.15]
-arena_spawn_margin: 0.15
-minimum_goal_distance: 1.5
-spawn_clearance: 0.04
-reset_attempts: 100
-
-# Four-component shared reward. Distances/scales are meters; goal_yaw is radians.
-reward_mode: pose
-goal_yaw: 0.0
+# The four requested reward components.
 distance_weight: 0.1
 orientation_weight: 0.05
-distance_scale: 1.0
-orientation_distance_scale: 1.0
 progress_weight: 2.0
 success_reward: 20.0
-# Exceptional terminal penalty for invalid physics, outside the normal reward.
+distance_scale: 1.0
+orientation_distance_scale: 1.0
 failure_penalty: 20.0
 
-# Fail the episode if any physics substep violates these diagnostic limits.
+# Physical safety checks, not motion controllers.
 max_penetration: 0.005
 max_linear_speed: 5.0
 max_angular_speed: 10.0

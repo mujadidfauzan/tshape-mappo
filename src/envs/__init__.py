@@ -1,4 +1,4 @@
-"""T-shape transport environments; importing physics does not load GUI or YAML."""
+"""Fixed Easy cooperative transport."""
 
 
 def parallel_env(**kwargs):
