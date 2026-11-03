@@ -1,4 +1,4 @@
-"""Fixed-layout, contact, termination and Parallel API checks."""
+"""Fixed/randomized spawns, variable populations, contacts and Parallel API."""
 
 from dataclasses import replace
 import unittest
@@ -14,7 +14,9 @@ from src.envs.tshape_env import TShapeParallelEnv
 
 class EasyTests(unittest.TestCase):
     def env(self, **overrides):
-        env=TShapeParallelEnv(replace(load_config(),**overrides))
+        values = dict(randomize_agents=False)
+        values.update(overrides)
+        env=TShapeParallelEnv(replace(load_config(),**values))
         self.addCleanup(env.close)
         return env
 
@@ -41,7 +43,7 @@ class EasyTests(unittest.TestCase):
         self.assertFalse(env.object_inside_goal())
 
     def test_removed_modes_are_rejected(self):
-        for values in [{"randomize_reset":False},{"difficulty":"medium"},{"num_agents":8}]:
+        for values in [{"randomize_reset":False},{"difficulty":"medium"}]:
             with self.subTest(values=values),self.assertRaises(ValueError):
                 load_config(values)
         env=self.env()
@@ -51,7 +53,68 @@ class EasyTests(unittest.TestCase):
         np.testing.assert_array_equal(env.physics.data.qpos,original)
 
     def test_parallel_api(self):
-        parallel_api_test(self.env(max_steps=3),num_cycles=5)
+        for count in [1,2,4,8,16]:
+            with self.subTest(num_agents=count):
+                parallel_api_test(self.env(max_steps=3,num_agents=count,randomize_agents=True),num_cycles=5)
+
+    def test_random_spawns_are_safe_near_the_rotated_object_for_all_counts(self):
+        for count in [1,2,4,8,16]:
+            with self.subTest(num_agents=count):
+                env=self.env(num_agents=count,randomize_agents=True,object_pose=(-1.5,-1.5,.4))
+                self.assertEqual(env.physics.model.nu,2*count)
+                self.assertEqual(env.physics.model.nq,3+2*count)
+                for seed in range(20):
+                    obs,infos=env.reset(seed=seed)
+                    self.assertEqual(len(obs),count)
+                    self.assertEqual(env.state().shape,(17+4*count,))
+                    self.assertTrue(all(v.shape==(18+4*count,) for v in obs.values()))
+                    self.assertTrue(all(env.observation_space(n).contains(obs[n]) for n in obs))
+                    self.assertTrue(env.physics.diagnostics()["stable"])
+                    self.assertEqual(env.physics.boundary_penetration(),0)
+                    self.assertFalse(any(c.dist<0 for c in env.physics.data.contact[:env.physics.data.ncon]))
+                    positions,_=env.physics.get_agents_state()
+                    for i,point in enumerate(positions):
+                        distances=[]
+                        for g in env.physics.object_geom_ids:
+                            rot=env.physics.data.geom_xmat[g].reshape(3,3)[:2,:2]
+                            local=rot.T@(point-env.physics.data.geom_xpos[g,:2])
+                            distances.append(np.linalg.norm(np.maximum(abs(local)-env.physics.model.geom_size[g,:2],0)))
+                        gap=min(distances)-env.physics.radii[i]
+                        self.assertGreaterEqual(gap,env.config.spawn_gap_min-1e-9)
+                        self.assertLessEqual(gap,env.config.spawn_gap_max+1e-9)
+                        for j in range(i):
+                            self.assertGreaterEqual(np.linalg.norm(point-positions[j]),
+                                                    env.physics.radii[i]+env.physics.radii[j]+.01-1e-9)
+                    np.testing.assert_allclose(infos["agent_0"]["initial_state"]["object_position"],[-1.5,-1.5])
+                    np.testing.assert_array_equal(env.physics.data.qvel,0)
+                _,_,_,_,info=env.step(self.zeros(env))
+                self.assertEqual(len(info["agent_0"]["episode_metrics"]["agent_object_contact_time_s"]),count)
+
+    def test_spawn_seed_reproduces_a_sequence_without_repeating_every_episode(self):
+        env=self.env(num_agents=16,randomize_agents=True)
+        sequences=[]
+        for _ in range(2):
+            sequence=[]
+            for seed in [123,None,None]:
+                env.reset(seed=seed)
+                sequence.append(env.physics.get_agents_state()[0])
+            sequences.append(sequence)
+        for a,b in zip(*sequences):
+            np.testing.assert_array_equal(a,b)
+        self.assertFalse(np.array_equal(sequences[0][0],sequences[0][1]))
+        self.assertFalse(np.array_equal(sequences[0][1],sequences[0][2]))
+        fixed=self.env(num_agents=8)
+        fixed.reset(seed=1)
+        first=fixed.physics.get_agents_state()[0]
+        fixed.reset(seed=2)
+        np.testing.assert_array_equal(first,fixed.physics.get_agents_state()[0])
+
+    def test_invalid_population_and_spawn_settings_are_rejected(self):
+        for values in [dict(num_agents=0),dict(num_agents=17),dict(num_agents=True),
+                       dict(num_agents=2,agent_positions=[[0,0]]),dict(randomize_agents=1),
+                       dict(spawn_gap_min=.2,spawn_gap_max=.1),dict(spawn_gap_min=.04,spawn_gap_max=.04)]:
+            with self.subTest(values=values),self.assertRaises(ValueError):
+                load_config(values)
 
     def test_reference_controller_physically_completes_fixed_easy(self):
         env=self.env()

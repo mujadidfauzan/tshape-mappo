@@ -37,6 +37,7 @@ class MAPPOConfig:
     normalization_clip: float = 10.0
     checkpoint_interval_steps: int = 10000
     eval_interval_steps: int = 10000
+    eval_episodes: int = 10
     torch_threads: int = 1
     video_interval_steps: int = 100000
     video_width: int = 1920
@@ -49,7 +50,7 @@ class MAPPOConfig:
     def __post_init__(self):
         integer_fields = ("total_steps", "rollout_steps", "ppo_epochs", "num_minibatches",
                           "actor_hidden_size", "critic_hidden_size", "checkpoint_interval_steps",
-                          "eval_interval_steps", "torch_threads", "stats_window_size")
+                          "eval_interval_steps", "eval_episodes", "torch_threads", "stats_window_size")
         for name in (*integer_fields, "seed"):
             value = getattr(self, name)
             minimum = 0 if name == "seed" else 1

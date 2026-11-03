@@ -1,6 +1,7 @@
 """Small integration checks; no claim that a short training run learns the task."""
 
 from contextlib import redirect_stdout
+from copy import deepcopy
 from dataclasses import replace
 import importlib.util
 import io
@@ -30,7 +31,7 @@ class TrainingTests(unittest.TestCase):
         cfg=self.config()
         with tempfile.TemporaryDirectory() as directory,redirect_stdout(io.StringIO()):
             root=Path(directory)
-            trainer=Trainer(root/"run",cfg,replace(load_config(),max_steps=3))
+            trainer=Trainer(root/"run",cfg,replace(load_config(),max_steps=3,randomize_agents=False))
             result=trainer.train()
             self.assertEqual(result["environment_steps"],8)
             self.assertEqual({p.name for p in (root/"run/checkpoints").iterdir()},{"best.pt","latest.pt"})
@@ -43,7 +44,21 @@ class TrainingTests(unittest.TestCase):
                 self.assertEqual(report["reports"][0]["initial_state"],report["reports"][1]["initial_state"])
                 self.assertAlmostEqual(report["reports"][0]["episode_metrics"]["episode_return"],
                                        report["reports"][1]["episode_metrics"]["episode_return"])
-                self.assertEqual(payload["training"]["task"],"fixed_easy_v1")
+                self.assertEqual(payload["training"]["task"],"easy_v2")
+                # The existing fixed-four results must keep their original reset behavior.
+                legacy=deepcopy(payload)
+                legacy["training"]["task"]="fixed_easy_v1"
+                legacy["training"]["environment_config"]["agent_positions"]=rows[0]["initial_state"]["agent_positions"]
+                for key in ["num_agents","randomize_agents","spawn_gap_min","spawn_gap_max"]:
+                    legacy["training"]["environment_config"].pop(key)
+                legacy["mappo_config"].pop("eval_episodes")
+                import torch
+                torch.save(legacy,root/"legacy.pt")
+                with loaded_policy(root/"legacy.pt") as (old_agent,old_env,_):
+                    self.assertFalse(old_env.randomize_agents)
+                    self.assertEqual(old_env.num_agents,4)
+                    old_report=evaluate_policy(old_agent,old_env)
+                    self.assertEqual(old_report["reports"][0]["initial_state"],rows[0]["initial_state"])
             resumed=Trainer(root/"resume",replace(cfg,total_steps=12),resume=root/"run/checkpoints/latest.pt")
             self.assertEqual(resumed.train()["environment_steps"],12)
             self.assertTrue((root/"resume/checkpoints/best.pt").exists())
@@ -54,6 +69,59 @@ class TrainingTests(unittest.TestCase):
                                   capture_output=True,text=True)
             self.assertNotEqual(result.returncode,0)
             self.assertIn("unrecognized arguments",result.stderr)
+
+    def test_population_training_random_resets_evaluation_and_rng_resume(self):
+        from src.envs.config import load_config
+        from src.evaluation.checkpoints import loaded_policy
+        from src.evaluation.evaluator import evaluate_policy
+        from src.training.trainer import Trainer
+        for count in [1,2,8,16]:
+            with self.subTest(num_agents=count),tempfile.TemporaryDirectory() as directory,redirect_stdout(io.StringIO()):
+                root=Path(directory)
+                cfg=replace(self.config(),eval_episodes=2)
+                trainer=Trainer(root/"run",cfg,replace(load_config(),max_steps=2,num_agents=count))
+                self.assertEqual(trainer.agent.dimensions["num_agents"],count)
+                trainer.train()
+                rows=[json.loads(s) for s in (root/"run/episodes.jsonl").read_text().splitlines()]
+                self.assertTrue(all(len(r["initial_state"]["agent_positions"])==count for r in rows))
+                self.assertNotEqual(rows[0]["initial_state"]["agent_positions"],rows[1]["initial_state"]["agent_positions"])
+                with loaded_policy(root/"run/checkpoints/latest.pt") as (agent,env_config,payload):
+                    self.assertEqual(env_config.num_agents,count)
+                    self.assertTrue(env_config.randomize_agents)
+                    first=evaluate_policy(agent,env_config,episodes=2,seed=1000000)
+                    second=evaluate_policy(agent,env_config,episodes=2,seed=1000000)
+                    self.assertEqual(first,second)
+                    self.assertNotEqual(first["reports"][0]["initial_state"],first["reports"][1]["initial_state"])
+                    state=payload["training"]["environment_rng_state"]
+                evaluations=[json.loads(s) for s in (root/"run/evaluations.jsonl").read_text().splitlines()]
+                self.assertTrue(all(len(r["reports"])==2 for r in evaluations))
+                resumed=Trainer(root/"resume",replace(cfg,total_steps=12),resume=root/"run/checkpoints/latest.pt")
+                self.assertEqual(resumed.env.np_random.bit_generator.state,state)
+                resumed.train()
+                self.assertEqual(resumed.agent.dimensions["num_agents"],count)
+
+    def test_cli_agent_count_overrides_default_yaml_and_rejects_resume_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            config=root/"mappo.yaml"
+            import yaml
+            config.write_text(yaml.safe_dump(replace(self.config(),total_steps=4).to_dict()))
+            env_config=root/"environment.yaml"
+            from src.envs.config import load_config
+            env_config.write_text(yaml.safe_dump(replace(load_config(),max_steps=2).to_dict()))
+            result=subprocess.run([sys.executable,"scripts/train.py","--run-dir",str(root/"run"),
+                "--config",str(config),"--env-config",str(env_config),"--num-agents","8"],
+                capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            manifest=json.loads((root/"run/manifest.json").read_text())
+            self.assertEqual(manifest["environment"]["num_agents"],8)
+            self.assertIn("agents=8",result.stdout)
+            result=subprocess.run([sys.executable,"scripts/train.py","--run-dir",str(root/"resume"),
+                "--resume",str(root/"run/checkpoints/latest.pt"),"--total-steps","8","--num-agents","4"],
+                capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("resume restores",result.stderr)
+            self.assertFalse((root/"resume").exists())
 
     def test_resume_before_the_first_evaluation_is_valid(self):
         from src.envs.config import load_config

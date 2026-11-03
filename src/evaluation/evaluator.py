@@ -1,4 +1,4 @@
-"""Evaluate a fixed layout without learning or changing the training RNG."""
+"""Evaluate seeded Easy layouts without learning or changing the training RNG."""
 
 from contextlib import ExitStack
 from pathlib import Path
@@ -31,9 +31,9 @@ def evaluate_policy(agent, config, episodes=1, seed=42, deterministic=True, rend
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError("seed must be a nonnegative integer")
     env = TShapeParallelEnv(config, render_mode="human" if render else None)
-    if agent.dimensions != dict(observation_size=34,state_size=33,action_size=2,num_agents=4):
+    if agent.dimensions != env.policy_dimensions:
         env.close()
-        raise ValueError("policy dimensions do not match the fixed four-agent task")
+        raise ValueError("policy dimensions do not match the saved Easy agent count")
     devices = ([agent.device.index if agent.device.index is not None else torch.cuda.current_device()]
                if agent.device.type == "cuda" else [])
     was_training = agent.training

@@ -1,13 +1,13 @@
-# One fixed Easy scenario; every reset uses these exact coordinates.
+# Easy: object and target stay fixed; agents spawn near the object each episode.
 model_path: assets/mujoco/arena.xml
 frame_skip: 50
 max_steps: 500
 object_pose: [-1.5, -1.5, 0.0]
-agent_positions:
-  - [-1.68, -1.05]
-  - [-1.32, -1.05]
-  - [-1.61, -1.76]
-  - [-1.61, -1.24]
+num_agents: 4
+randomize_agents: true
+spawn_gap_min: 0.04
+spawn_gap_max: 0.12
+agent_positions: null
 goal_center: [1.5, 1.5]
 goal_half_size: [0.75, 0.65]
 goal_yaw: 0.0

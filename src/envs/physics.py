@@ -1,10 +1,12 @@
-"""Planar MuJoCo mechanics for the fixed four-agent Easy arena."""
+"""Planar MuJoCo mechanics for the Easy arena."""
 
 from pathlib import Path
 import re
 
 import mujoco
 import numpy as np
+
+from .model import build_model_xml
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "assets" / "mujoco" / "arena.xml"
@@ -18,12 +20,12 @@ def finite_array(value, shape, name):
 
 
 class TShapePhysics:
-    def __init__(self, frame_skip=50, model_path=MODEL_PATH):
+    def __init__(self, frame_skip=50, model_path=MODEL_PATH, num_agents=None):
         if isinstance(frame_skip, bool) or not isinstance(frame_skip, (int, np.integer)) or frame_skip < 1:
             raise ValueError("frame_skip must be a positive integer")
         self.model_path = Path(model_path).resolve()
         xml = self.model_path.read_text()
-        self.model_xml = xml
+        self.model_xml = xml if num_agents is None else build_model_xml(xml, num_agents)
         self.model = m = mujoco.MjModel.from_xml_string(self.model_xml)
         self.data = mujoco.MjData(m)
         self.frame_skip = int(frame_skip)
@@ -33,8 +35,8 @@ class TShapePhysics:
             ], key=lambda name: int(name.split("_")[1])
         )
         self.num_agents = n = len(self.agent_names)
-        if n != 4 or self.agent_names != [f"agent_{i}" for i in range(4)]:
-            raise ValueError("The Easy baseline requires exactly agent_0 through agent_3")
+        if not 1 <= n <= 16 or self.agent_names != [f"agent_{i}" for i in range(n)]:
+            raise ValueError("Easy requires 1 to 16 consecutively named agents starting at agent_0")
         self.agent_bodies = np.array([m.body(n).id for n in self.agent_names])
         self.agent_geom_ids = np.array([m.geom(f"{n}_geom").id for n in self.agent_names])
         self.agent_geoms = set(self.agent_geom_ids.tolist())

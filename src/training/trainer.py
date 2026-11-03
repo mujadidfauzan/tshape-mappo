@@ -1,4 +1,4 @@
-"""Train MAPPO on one fixed Easy layout; save only best and latest."""
+"""Train MAPPO on Easy with a fixed agent count per run; keep best and latest."""
 
 from dataclasses import replace
 import hashlib
@@ -14,6 +14,7 @@ import yaml
 from src.algorithms.mappo import MAPPO
 from src.algorithms.rollout_buffer import RolloutBuffer
 from src.envs.config import load_config
+from src.envs.model import build_model_xml
 from src.envs.tshape_env import TShapeParallelEnv
 from src.evaluation.evaluator import evaluate_policy
 from .artifacts import append_jsonl, record_evaluation, write_json
@@ -37,14 +38,14 @@ class Trainer:
             raise FileExistsError(f"choose a new run directory: {self.run_dir}")
         if resume is not None:
             if environment_config is not None:
-                raise ValueError("resume uses the fixed task saved in the checkpoint")
+                raise ValueError("resume uses the task saved in the checkpoint")
             self.agent, payload = MAPPO.from_checkpoint(resume,device=cfg.device,load_optimizers=True)
             saved = payload["training"]
-            if saved.get("task") != "fixed_easy_v1":
-                raise ValueError("resume requires a fixed Easy checkpoint")
+            if saved.get("task") not in ("fixed_easy_v1", "easy_v2"):
+                raise ValueError("resume requires an Easy checkpoint")
             previous = load_mappo_config(payload["mappo_config"])
             allowed = {"device","total_steps","eval_interval_steps","checkpoint_interval_steps",
-                       "video_interval_steps","tensorboard","reward_log_interval_steps"}
+                       "video_interval_steps","tensorboard","reward_log_interval_steps","eval_episodes"}
             if any(getattr(previous,k) != v for k,v in cfg.to_dict().items() if k not in allowed):
                 raise ValueError("resume restores network and optimizer settings from the checkpoint")
             base = load_config(saved["environment_config"])
@@ -55,7 +56,7 @@ class Trainer:
             self.agent.config = cfg
         else:
             base = load_config(environment_config)
-            xml = base.resolved_model_path.read_text()
+            xml = build_model_xml(base.resolved_model_path.read_text(), base.num_agents)
         if cfg.total_steps <= self.steps:
             raise ValueError("total_steps must exceed the checkpoint's cumulative timestep count")
         self.model_xml = xml
@@ -81,25 +82,28 @@ class Trainer:
         self.env.config = self.environment_config
         self.env.physics.model_path = snapshot
         if self.agent is None:
-            self.agent = MAPPO(34,33,num_agents=4,config=cfg)
-        if self.agent.dimensions != dict(observation_size=34,state_size=33,action_size=2,num_agents=4):
+            self.agent = MAPPO(**self.env.policy_dimensions,config=cfg)
+        if self.agent.dimensions != self.env.policy_dimensions:
             self.env.close()
-            raise ValueError("checkpoint dimensions do not match fixed Easy")
+            raise ValueError("checkpoint dimensions do not match the Easy agent count")
         (self.run_dir/"environment.yaml").write_text(yaml.safe_dump(self.environment_config.to_dict()))
         (self.run_dir/"mappo.yaml").write_text(yaml.safe_dump(cfg.to_dict()))
         self.logger = RunLogger(self.run_dir,cfg.tensorboard,cfg.reward_log_interval_steps)
         write_json(self.run_dir/"manifest.json",dict(
-            task="fixed_easy_v1",environment=self.environment_config.to_dict(),mappo=cfg.to_dict(),
+            task="easy_v2",environment=self.environment_config.to_dict(),mappo=cfg.to_dict(),
             model_sha256=self.model_hash,actual_device=str(self.agent.device),
             resume_source=str(Path(resume).resolve()) if resume else None,
             previous_run_best_score=saved["best_score"] if saved else None,
-            starting_steps=self.steps,reset_behavior="fixed",
+            starting_steps=self.steps,reset_behavior="random_agents" if base.randomize_agents else "fixed",
             software={n:version(n) for n in ("torch","mujoco","numpy","pettingzoo")}))
         if saved:
             self.rng.bit_generator.state = saved["minibatch_rng_state"]
             torch.set_rng_state(saved["torch_rng_state"])
             if self.agent.device.type == "cuda" and saved.get("cuda_rng_state") is not None:
                 torch.cuda.set_rng_state(saved["cuda_rng_state"],self.agent.device)
+        self._resume_environment_rng = saved.get("environment_rng_state") if saved else None
+        if self._resume_environment_rng is not None:
+            self.env.np_random.bit_generator.state = self._resume_environment_rng
         self.next_eval = self._next(cfg.eval_interval_steps)
         self.next_checkpoint = self._next(cfg.checkpoint_interval_steps)
         self.next_video = self._next(cfg.video_interval_steps) if cfg.video_interval_steps else None
@@ -109,17 +113,20 @@ class Trainer:
 
     def checkpoint(self, name):
         self.agent.save_checkpoint(self.run_dir/"checkpoints"/name,dict(
-            task="fixed_easy_v1",environment_steps=self.steps,updates=self.updates,
+            task="easy_v2",environment_steps=self.steps,updates=self.updates,
             completed_episodes=self.completed_episodes,
             best_score=list(self.best_score) if self.best_score[0] >= 0 else None,
             environment_config=self.environment_config.to_dict(),model_xml=self.model_xml,
             model_sha256=self.model_hash,episode_stats=self.stats.state_dict(),
-            minibatch_rng_state=self.rng.bit_generator.state,torch_rng_state=torch.get_rng_state(),
+            minibatch_rng_state=self.rng.bit_generator.state,
+            environment_rng_state=self.env.np_random.bit_generator.state,
+            torch_rng_state=torch.get_rng_state(),
             cuda_rng_state=torch.cuda.get_rng_state(self.agent.device)
                 if self.agent.device.type == "cuda" else None))
 
     def _evaluate(self, video=False):
-        result = evaluate_policy(self.agent,self.environment_config,seed=self.config.seed,
+        episodes = self.config.eval_episodes if self.environment_config.randomize_agents and not video else 1
+        result = evaluate_policy(self.agent,self.environment_config,episodes=episodes,seed=1000000,
                                  video_dir=self.run_dir/"videos"/f"step_{self.steps:09d}" if video else None)
         result.update(kind="video" if video else "evaluation",environment_steps=self.steps,update=self.updates)
         if video:
@@ -137,7 +144,7 @@ class Trainer:
     def train(self):
         cfg = self.config
         names = self.env.possible_agents
-        observations,_ = self.env.reset(seed=cfg.seed)
+        observations,_ = self.env.reset(seed=cfg.seed if self._resume_environment_rng is None else None)
         started, first_step = time.perf_counter(), self.steps
         self.checkpoint("latest.pt")
         try:
@@ -168,7 +175,7 @@ class Trainer:
                             "length":info["episode_step"],"success":int(info["success"])},self.steps)
                         self.logger.scalars("contact",{f"agent_{i}_time_s":v for i,v in
                             enumerate(info["episode_metrics"]["agent_object_contact_time_s"])},self.steps)
-                        observations,_ = self.env.reset(seed=cfg.seed)
+                        observations,_ = self.env.reset()
                 metrics = self.agent.update(buffer,self.rng)
                 self.updates += 1
                 elapsed = time.perf_counter()-started

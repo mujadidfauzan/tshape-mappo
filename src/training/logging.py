@@ -1,4 +1,4 @@
-"""A rolling episode window and TensorBoard logging for fixed Easy."""
+"""A rolling episode window and TensorBoard logging for Easy."""
 
 from collections import deque
 import math

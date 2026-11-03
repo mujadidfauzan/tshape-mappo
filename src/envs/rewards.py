@@ -1,4 +1,4 @@
-"""Four-component team reward for the fixed Easy task."""
+"""Four-component team reward for the Easy task."""
 
 import math
 

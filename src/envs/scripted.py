@@ -4,6 +4,8 @@ import numpy as np
 
 
 def scripted_actions(env):
+    if env.config.num_agents != 4 or env.config.randomize_agents:
+        raise ValueError("the reference controller requires the fixed four-agent demo layout")
     if env.object_inside_goal():
         return {name: np.zeros(2, np.float32) for name in env.possible_agents}
     p = env.physics

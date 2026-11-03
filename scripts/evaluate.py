@@ -1,4 +1,4 @@
-"""Evaluate a fixed Easy checkpoint; optionally view or record the first episode."""
+"""Evaluate an Easy checkpoint with its saved agent count and spawn settings."""
 
 import argparse
 import os
@@ -14,7 +14,7 @@ def main():
     parser.add_argument("checkpoint",type=Path)
     parser.add_argument("--device",choices=["cpu","cuda","auto"],default="auto")
     parser.add_argument("--episodes",type=int,default=1)
-    parser.add_argument("--seed",type=int,default=42,help="action sampling seed; does not change the layout")
+    parser.add_argument("--seed",type=int,default=1000000,help="seed for agent spawns and action sampling")
     parser.add_argument("--stochastic",action="store_true")
     parser.add_argument("--render",action="store_true")
     parser.add_argument("--video-dir",type=Path,help="save the first episode as policy.mp4")
@@ -22,7 +22,7 @@ def main():
     args=parser.parse_args()
     if not args.render and sys.platform.startswith("linux"):
         os.environ.setdefault("MUJOCO_GL","egl")
-    print(f"Loading fixed Easy policy: {args.checkpoint}",flush=True)
+    print(f"Loading Easy policy: {args.checkpoint}",flush=True)
     import torch
     torch.set_num_threads(1)
     from src.evaluation.checkpoints import loaded_policy
@@ -41,7 +41,7 @@ def main():
         result=evaluate_policy(agent,config,episodes=args.episodes,seed=args.seed,
                                deterministic=not args.stochastic,render=args.render,
                                video_dir=args.video_dir,progress_callback=progress)
-        result.update(checkpoint=str(args.checkpoint.resolve()),task="fixed_easy_v1",
+        result.update(checkpoint=str(args.checkpoint.resolve()),task=payload["training"]["task"],
                       model_sha256=payload["training"]["model_sha256"])
     if args.json:
         write_json(args.json,result)

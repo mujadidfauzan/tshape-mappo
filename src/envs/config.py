@@ -1,4 +1,4 @@
-"""Fixed Easy task settings. No randomization or curriculum options."""
+"""Easy task settings: fixed object/target, configurable agent count and spawns."""
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
@@ -17,8 +17,12 @@ class EnvironmentConfig:
     model_path: str = "assets/mujoco/arena.xml"
     frame_skip: int = 50
     max_steps: int = 500
+    num_agents: int = 4
+    randomize_agents: bool = False  # Old snapshots omit this key; new runs enable it in YAML.
+    spawn_gap_min: float = .04
+    spawn_gap_max: float = .12
     object_pose: tuple = (-1.5, -1.5, 0.0)
-    agent_positions: tuple = ((-1.68, -1.05), (-1.32, -1.05), (-1.61, -1.76), (-1.61, -1.24))
+    agent_positions: tuple | None = None
     goal_center: tuple = (1.5, 1.5)
     goal_half_size: tuple = (.75, .65)
     goal_yaw: float = 0.0
@@ -37,12 +41,18 @@ class EnvironmentConfig:
     max_angular_speed: float = 10.0
 
     def __post_init__(self):
+        if isinstance(self.num_agents, bool) or not isinstance(self.num_agents, int) or not 1 <= self.num_agents <= 16:
+            raise ValueError("num_agents must be an integer from 1 to 16")
+        if not isinstance(self.randomize_agents, bool):
+            raise ValueError("randomize_agents must be boolean")
         for name in ("frame_skip", "max_steps", "success_hold_steps"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name, shape in (("object_pose", (3,)), ("agent_positions", (4, 2)),
+        for name, shape in (("object_pose", (3,)), ("agent_positions", (self.num_agents, 2)),
                             ("goal_center", (2,)), ("goal_half_size", (2,))):
+            if name == "agent_positions" and self.agent_positions is None:
+                continue
             array = np.asarray(getattr(self, name), dtype=float)
             if array.shape != shape or not np.isfinite(array).all():
                 raise ValueError(f"{name} must have shape {shape} and finite values")
@@ -53,7 +63,7 @@ class EnvironmentConfig:
         nonnegative = ("success_linear_speed", "success_angular_speed", "distance_weight",
                        "orientation_weight", "progress_weight", "success_reward", "failure_penalty",
                        "distance_scale", "orientation_distance_scale", "max_penetration",
-                       "max_linear_speed", "max_angular_speed")
+                       "max_linear_speed", "max_angular_speed", "spawn_gap_min", "spawn_gap_max")
         for name in (*nonnegative, "goal_yaw"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value):
@@ -61,6 +71,8 @@ class EnvironmentConfig:
             if name in nonnegative and value < 0:
                 raise ValueError(f"{name} cannot be negative")
             object.__setattr__(self, name, float(value))
+        if self.spawn_gap_max <= self.spawn_gap_min:
+            raise ValueError("spawn_gap_max must be > spawn_gap_min")
         for name in ("distance_scale", "orientation_distance_scale", "max_penetration",
                      "max_linear_speed", "max_angular_speed"):
             if getattr(self, name) <= 0:

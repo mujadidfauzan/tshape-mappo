@@ -14,8 +14,10 @@ def main():
     parser.add_argument("--render",action="store_true")
     args=parser.parse_args()
     from src.envs.tshape_env import TShapeParallelEnv
+    from src.envs.config import load_config
     from src.envs.scripted import scripted_actions
-    env=TShapeParallelEnv(render_mode="human" if args.render else None)
+    env=TShapeParallelEnv(load_config(num_agents=4,randomize_agents=False,agent_positions=None),
+                         render_mode="human" if args.render else None)
     try:
         _,infos=env.reset(seed=42)
         print(f"Fixed initial state: {infos['agent_0']['initial_state']}",flush=True)

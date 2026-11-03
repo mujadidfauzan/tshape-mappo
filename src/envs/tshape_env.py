@@ -1,4 +1,4 @@
-"""PettingZoo Parallel environment for one fixed four-agent Easy task."""
+"""Easy Parallel environment with a fixed object/goal and configurable agents."""
 
 from contextlib import nullcontext
 from copy import deepcopy
@@ -8,21 +8,23 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from .config import load_config
-from .observations import OBSERVATION_SIZE, STATE_SIZE, build_observations, build_state
+from .observations import feature_sizes, build_observations, build_state
 from .physics import TShapePhysics, finite_array
+from .spawning import sample_agent_positions
 from .rewards import team_reward, wrapped_yaw_error
 from .termination import goal_is_settled, object_inside_goal
 
 
 class TShapeParallelEnv(ParallelEnv):
-    metadata = {"name": "tshape_fixed_easy_v1", "render_modes": ["human"],
+    metadata = {"name": "tshape_easy_v2", "render_modes": ["human"],
                 "render_fps": 20, "is_parallelizable": True}
 
     def __init__(self, config=None, render_mode=None):
         if render_mode not in (None, "human"):
             raise ValueError("render_mode must be None or human")
         self.config = cfg = load_config(config)
-        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path)
+        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path, cfg.num_agents)
+        self.np_random = np.random.default_rng(0)
         self.goal_center = np.asarray(cfg.goal_center)
         self.goal_half_size = np.asarray(cfg.goal_half_size)
         if (np.any(self.goal_center - self.goal_half_size < self.physics.lower)
@@ -34,8 +36,11 @@ class TShapeParallelEnv(ParallelEnv):
         self.render_mode = render_mode
         self.viewer = None
         self.metadata = {**type(self).metadata, "render_fps": round(1/self.physics.control_dt)}
-        self.state_space = spaces.Box(-np.inf, np.inf, (STATE_SIZE,), np.float32)
-        self._observation_spaces = {n: spaces.Box(-np.inf, np.inf, (OBSERVATION_SIZE,), np.float32)
+        observation_size, state_size = feature_sizes(cfg.num_agents)
+        self.policy_dimensions = dict(observation_size=observation_size, state_size=state_size,
+                                      action_size=2, num_agents=cfg.num_agents)
+        self.state_space = spaces.Box(-np.inf, np.inf, (state_size,), np.float32)
+        self._observation_spaces = {n: spaces.Box(-np.inf, np.inf, (observation_size,), np.float32)
                                     for n in self.possible_agents}
         self._action_spaces = {n: spaces.Box(-1., 1., (2,), np.float32) for n in self.possible_agents}
         self._has_reset = False
@@ -47,11 +52,21 @@ class TShapeParallelEnv(ParallelEnv):
         self._restore_layout()
 
     def _restore_layout(self):
-        self.physics.reset(self.config.object_pose, self.config.agent_positions)
+        cfg, physics = self.config, self.physics
+        physics.reset(cfg.object_pose)
+        if cfg.randomize_agents:
+            positions = sample_agent_positions(physics, self.np_random, cfg.spawn_gap_min, cfg.spawn_gap_max)
+        elif cfg.agent_positions is not None:
+            positions = cfg.agent_positions
+        elif cfg.num_agents == 4:
+            positions = physics.model.body_pos[physics.agent_bodies, :2]
+        else:
+            positions = sample_agent_positions(physics, np.random.default_rng(0), cfg.spawn_gap_min, cfg.spawn_gap_max)
+        physics.reset(cfg.object_pose, positions)
         if self.physics.boundary_penetration() > 1e-9:
-            raise ValueError("fixed initial bodies must fit inside the arena")
+            raise ValueError("initial bodies must fit inside the arena")
         if any(c.dist < -1e-9 for c in self.physics.data.contact[:self.physics.data.ncon]):
-            raise ValueError("fixed initial bodies must not overlap")
+            raise ValueError("initial bodies must not overlap")
         if self.object_inside_goal():
             raise ValueError("the fixed initial object must start outside the target")
 
@@ -84,10 +99,11 @@ class TShapeParallelEnv(ParallelEnv):
         return object_inside_goal(self.physics.object_corners(), self.goal_center, self.goal_half_size)
 
     def reset(self, seed=None, options=None):
-        # Parallel API accepts an options mapping. It never changes this layout.
+        # Options never override the saved task or spawn distribution.
         if seed is not None:
             if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
                 raise ValueError("seed must be a nonnegative integer")
+            self.np_random = np.random.default_rng(seed)
             for i, name in enumerate(self.possible_agents):
                 self.action_space(name).seed(seed+i)
         with self.viewer.lock() if self.viewer is not None else nullcontext():
@@ -98,7 +114,7 @@ class TShapeParallelEnv(ParallelEnv):
             self._failure_details = None
             self._metrics = dict(episode_return=0., object_path_length_m=0., control_effort_N2_s=0.,
                                  wall_collision_events=0, max_penetration_m=0., inside_goal_steps=0,
-                                 agent_object_contact_time_s=[0.]*4)
+                                 agent_object_contact_time_s=[0.]*self.config.num_agents)
             obj = self.physics.get_object_state()
             self._initial_state = dict(object_position=obj["position"].tolist(), object_yaw=obj["yaw"],
                                        agent_positions=self.physics.get_agents_state()[0].tolist(),
@@ -133,7 +149,7 @@ class TShapeParallelEnv(ParallelEnv):
         names = self.agents.copy()
         if set(actions) != set(names):
             raise ValueError("provide one action for each live agent")
-        array = finite_array([actions[n] for n in names], (4, 2), "actions")
+        array = finite_array([actions[n] for n in names], (self.config.num_agents, 2), "actions")
         previous = self._distance() if self._finite() else 0.
         cfg = self.config
         with self.viewer.lock() if self.viewer is not None else nullcontext():

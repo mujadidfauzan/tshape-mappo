@@ -1,4 +1,4 @@
-# Fixed Easy only. Budgets count joint environment timesteps.
+# Easy only. Budgets count joint environment timesteps.
 seed: 42
 device: cpu
 total_steps: 100000
@@ -22,8 +22,9 @@ normalize_inputs: true
 normalization_clip: 10.0
 torch_threads: 1
 
-# The deterministic layout needs only one deterministic episode per check.
+# Random-agent runs use ten seeded layouts; fixed-agent runs need one.
 eval_interval_steps: 10000
+eval_episodes: 10
 checkpoint_interval_steps: 10000
 video_interval_steps: 100000
 video_width: 1920

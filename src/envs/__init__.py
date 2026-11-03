@@ -1,4 +1,4 @@
-"""Fixed Easy cooperative transport."""
+"""Easy cooperative transport."""
 
 
 def parallel_env(**kwargs):

@@ -1,4 +1,4 @@
-"""Load only self-contained checkpoints from the fixed Easy baseline."""
+"""Load self-contained Easy checkpoints with their saved agent count and spawns."""
 
 from contextlib import contextmanager
 from dataclasses import replace
@@ -14,8 +14,8 @@ from src.envs.config import load_config
 def loaded_policy(checkpoint, device="cpu"):
     agent, payload = MAPPO.from_checkpoint(checkpoint, device=device)
     training = payload["training"]
-    if training.get("task") != "fixed_easy_v1":
-        raise ValueError("this checkpoint was not created by the fixed Easy trainer")
+    if training.get("task") not in ("fixed_easy_v1", "easy_v2"):
+        raise ValueError("this checkpoint was not created by the Easy trainer")
     xml = training["model_xml"]
     if hashlib.sha256(xml.encode()).hexdigest() != training["model_sha256"]:
         raise ValueError("checkpoint model hash mismatch")
