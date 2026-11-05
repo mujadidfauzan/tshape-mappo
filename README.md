@@ -185,7 +185,7 @@ Dengan d = jarak pusat objek ke target, dan delta = selisih yaw terpendek:
 distance    = -d / (d + distance_scale)
 orientation = -exp(-d / orientation_distance_scale) * abs(delta) / pi
 progress    = previous_distance - d
-success     = 1 hanya pada langkah terminal sukses
+success     = 1 hanya saat syarat sukses pertama kali terpenuhi dalam episode
 
 reward = 0.1*distance + 0.05*orientation + 2*progress + 20*success
 ~~~
@@ -203,9 +203,20 @@ Sukses memerlukan seluruh sudut ketiga geometri objek masuk target, kecepatan li
 <=0,05 m/s, dan kecepatan yaw <=0,1 rad/s selama lima keputusan berturut-turut.
 Pusat objek tidak harus tepat pada pusat area target.
 
+Sukses tidak mengakhiri episode. Bonus +20 diberikan sekali pada pencapaian pertama;
+episode terus berjalan sampai batas langkah. `success` mencatat bahwa episode pernah
+berhasil, dan `completion_time_s` menyimpan waktu pencapaian pertama, meskipun objek
+kemudian keluar target. Fitur observasi/state `goal_hold_fraction` tetap 1 setelah
+pencapaian pertama agar policy mengetahui bonus sudah diterima. Sebelum itu, fitur
+ini menunjukkan kemajuan hold saat ini. `goal_hold_steps` pada info tetap menghitung
+hold aktual dan kembali nol ketika objek keluar atau belum tenang.
+
 Goal yaw merupakan preferensi reward; tidak ada toleransi sudut tambahan pada
-syarat sukses. Timeout adalah truncation. Sukses atau kegagalan fisika adalah
-termination. GAE melakukan bootstrap pada timeout dari state akhir sebelum reset.
+syarat sukses. Timeout adalah truncation, termasuk episode yang pernah berhasil.
+Hanya kegagalan fisika yang menjadi termination; episode tersebut dilaporkan gagal
+meskipun sebelumnya sempat mencapai target. GAE melakukan bootstrap pada timeout
+dari state akhir sebelum reset. Evaluasi sekarang memakai aturan ini juga untuk
+checkpoint lama, sehingga return dan panjang episode dapat berbeda dari log lama.
 
 Pemeriksaan setiap physics substep mendeteksi state non-finite, peringatan MuJoCo,
 penetrasi >5 mm, linear speed >5 m/s, dan yaw speed >10 rad/s.

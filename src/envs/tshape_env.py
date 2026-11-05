@@ -80,7 +80,9 @@ class TShapeParallelEnv(ParallelEnv):
         return np.isfinite(self.physics.data.qpos).all() and np.isfinite(self.physics.data.qvel).all()
 
     def _fractions(self):
-        return max(0., 1-self.steps/self.max_steps), min(1., self.goal_hold_count/self.config.success_hold_steps)
+        # Keep the one-time success event observable after the object leaves the goal.
+        hold = 1. if self._completion_time_s is not None else min(1., self.goal_hold_count/self.config.success_hold_steps)
+        return max(0., 1-self.steps/self.max_steps), hold
 
     def _observations(self):
         if self._failed:
@@ -110,6 +112,7 @@ class TShapeParallelEnv(ParallelEnv):
             self._restore_layout()
             self.agents = self.possible_agents.copy()
             self.steps = self.goal_hold_count = 0
+            self._completion_time_s = None
             self._failed = False
             self._failure_details = None
             self._metrics = dict(episode_return=0., object_path_length_m=0., control_effort_N2_s=0.,
@@ -132,7 +135,7 @@ class TShapeParallelEnv(ParallelEnv):
         return dict(
             success=bool(success), stable=not self._failed, episode_step=self.steps,
             elapsed_time_s=float(self.physics.data.time) if np.isfinite(self.physics.data.time) else None,
-            completion_time_s=float(self.physics.data.time) if success else None,
+            completion_time_s=self._completion_time_s if success else None,
             distance_to_goal=self._distance() if finite else None,
             orientation_error_rad=abs(wrapped_yaw_error(obj["yaw"], self.config.goal_yaw)) if finite else None,
             goal_hold_steps=self.goal_hold_count, end_reason=reason, failure_reason=failure_reason,
@@ -163,12 +166,17 @@ class TShapeParallelEnv(ParallelEnv):
                 self.physics, self.goal_center, self.goal_half_size,
                 cfg.success_linear_speed, cfg.success_angular_speed))
             self.goal_hold_count = self.goal_hold_count + 1 if settled else 0
-            success = not self._failed and self.goal_hold_count >= cfg.success_hold_steps
-            terminated = success or self._failed
+            first_success = (not self._failed and self._completion_time_s is None
+                             and self.goal_hold_count >= cfg.success_hold_steps)
+            if first_success:
+                self._completion_time_s = float(self.physics.data.time)
+            success = not self._failed and self._completion_time_s is not None
+            # Reaching the goal does not end the episode. Only physics failure terminates.
+            terminated = self._failed
             truncated = self.steps >= self.max_steps and not terminated
             distance = self._distance() if self._finite() else previous
             yaw = self.physics.get_object_state()["yaw"] if not self._failed else 0.
-            reward, parts = team_reward(previous, distance, yaw, success, self._failed, cfg)
+            reward, parts = team_reward(previous, distance, yaw, first_success, self._failed, cfg)
             self._metrics["episode_return"] += reward
             for key in ("object_path_length_m", "control_effort_N2_s", "wall_collision_events"):
                 self._metrics[key] += report[key]
@@ -181,7 +189,7 @@ class TShapeParallelEnv(ParallelEnv):
             if not self._failed:
                 self._last_observations = {n: a.copy() for n, a in obs.items()}
                 self._last_state = self.state()
-            reason = "success" if success else "physics_failure" if self._failed else "time_limit" if truncated else None
+            reason = "physics_failure" if self._failed else "time_limit" if truncated else None
             info = self._info(success, parts, reason, report["failure_reason"])
             if terminated or truncated:
                 self.agents = []

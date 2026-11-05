@@ -124,7 +124,9 @@ class EasyTests(unittest.TestCase):
             self.assertTrue(infos["agent_0"]["stable"],infos["agent_0"]["failure_details"])
         info=infos["agent_0"]
         self.assertTrue(info["success"])
-        self.assertLess(info["episode_step"],env.max_steps)
+        self.assertEqual(info["episode_step"],env.max_steps)
+        self.assertLess(info["completion_time_s"],info["elapsed_time_s"])
+        self.assertEqual(info["end_reason"],"time_limit")
         self.assertGreater(info["episode_metrics"]["object_path_length_m"],2.5)
         self.assertLess(info["episode_metrics"]["max_penetration_m"],.005)
 
@@ -155,9 +157,69 @@ class EasyTests(unittest.TestCase):
         self.assertEqual(info["agent_0"]["goal_hold_steps"],0)
         env.physics.reset([gx,gy,0],env.config.agent_positions)
         for _ in range(5):
-            _,_,term,_,info=env.step(self.zeros(env))
-        self.assertTrue(all(term.values()))
+            _,_,term,trunc,info=env.step(self.zeros(env))
+        self.assertFalse(any(term.values()))
+        self.assertFalse(any(trunc.values()))
         self.assertTrue(info["agent_0"]["success"])
+        self.assertEqual(info["agent_0"]["reward_components"]["success"],20)
+        self.assertIsNone(info["agent_0"]["end_reason"])
+        self.assertEqual(len(env.agents),env.config.num_agents)
+
+    def test_success_bonus_is_once_and_episode_continues_after_leaving_and_reentering(self):
+        env=self.env(max_steps=20)
+        env.reset()
+        gx,gy=env.config.goal_center
+        env.physics.reset([gx,gy,0])
+        bonuses=[]
+        for _ in range(6):
+            _,_,term,trunc,infos=env.step(self.zeros(env))
+            bonuses.append(infos["agent_0"]["reward_components"]["success"])
+            self.assertFalse(any(term.values()))
+            self.assertFalse(any(trunc.values()))
+        completed=infos["agent_0"]["completion_time_s"]
+        self.assertAlmostEqual(completed,5*env.physics.control_dt)
+        env.physics.reset(env.config.object_pose)
+        obs,_,_,_,infos=env.step(self.zeros(env))
+        self.assertEqual(infos["agent_0"]["goal_hold_steps"],0)
+        self.assertTrue(infos["agent_0"]["success"])
+        self.assertEqual(obs["agent_0"][-1],1.)
+        env.physics.reset([gx,gy,0])
+        while env.agents:
+            _,_,term,trunc,infos=env.step(self.zeros(env))
+            bonuses.append(infos["agent_0"]["reward_components"]["success"])
+        self.assertEqual(sum(bonuses),20)
+        self.assertTrue(all(trunc.values()))
+        self.assertFalse(any(term.values()))
+        self.assertEqual(infos["agent_0"]["completion_time_s"],completed)
+        self.assertTrue(infos["agent_0"]["success"])
+        self.assertEqual(infos["agent_0"]["end_reason"],"time_limit")
+        env.reset()
+        _,_,_,_,infos=env.step(self.zeros(env))
+        self.assertFalse(infos["agent_0"]["success"])
+        self.assertIsNone(infos["agent_0"]["completion_time_s"])
+
+    def test_success_on_last_step_truncates_and_later_physics_failure_still_terminates(self):
+        env=self.env(max_steps=5)
+        env.reset()
+        gx,gy=env.config.goal_center
+        env.physics.reset([gx,gy,0])
+        for _ in range(5):
+            _,_,term,trunc,infos=env.step(self.zeros(env))
+        self.assertTrue(infos["agent_0"]["success"])
+        self.assertTrue(all(trunc.values()))
+        self.assertFalse(any(term.values()))
+        env=self.env(max_steps=10)
+        env.reset()
+        env.physics.reset([gx,gy,0])
+        for _ in range(5):
+            env.step(self.zeros(env))
+        env.physics.data.qpos[env.physics.object_qpos[0]]=np.nan
+        _,rewards,term,trunc,infos=env.step(self.zeros(env))
+        self.assertTrue(all(term.values()))
+        self.assertFalse(any(trunc.values()))
+        self.assertFalse(infos["agent_0"]["success"])
+        self.assertEqual(rewards["agent_0"],-20)
+        self.assertEqual(infos["agent_0"]["end_reason"],"physics_failure")
 
     def test_invalid_actions_do_not_advance_time(self):
         env=self.env()
