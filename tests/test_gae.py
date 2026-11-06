@@ -33,11 +33,23 @@ class GAETests(unittest.TestCase):
                        np.zeros(4), reward, 0, 0, True, False)
         batch = buffer.batch(0.99, 0.95)
         np.testing.assert_array_equal(batch["returns"], [1, 2])
+        np.testing.assert_allclose(batch["advantages"], [-1, 1])
         self.assertEqual(batch["observations"].shape, (2, 4, 3))
         self.assertEqual(batch["old_values"].shape, (2,))
         with self.assertRaises(ValueError):
             buffer.add(np.zeros((4, 3)), np.zeros(5), np.zeros((4, 2)),
                        np.zeros(4), 3, 0, 0, True, False)
+
+    def test_single_transition_preserves_advantage(self):
+        for capacity in (1, 4):
+            for reward in (5., -1.):
+                with self.subTest(capacity=capacity, reward=reward):
+                    buffer = RolloutBuffer(capacity, 4, 3, 5)
+                    buffer.add(np.zeros((4, 3)), np.zeros(5), np.zeros((4, 2)),
+                               np.zeros(4), reward, 2., 0., True, False)
+                    batch = buffer.batch(0.99, 0.95)
+                    np.testing.assert_allclose(batch["advantages"], [reward - 2.])
+                    np.testing.assert_allclose(batch["returns"], [reward])
 
     def test_invalid_shapes_and_nonfinite_rewards_are_rejected(self):
         with self.assertRaises(ValueError):

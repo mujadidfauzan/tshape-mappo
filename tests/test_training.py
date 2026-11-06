@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 @unittest.skipIf(importlib.util.find_spec("torch") is None,"install requirements-training.txt")
@@ -69,6 +70,22 @@ class TrainingTests(unittest.TestCase):
                                   capture_output=True,text=True)
             self.assertNotEqual(result.returncode,0)
             self.assertIn("unrecognized arguments",result.stderr)
+
+    def test_startup_failures_close_resources_and_propagate(self):
+        from src.training.trainer import Trainer
+        for stage in ("reset", "checkpoint"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                trainer = Trainer(Path(directory)/"run", self.config())
+                error = OSError(f"simulated {stage} failure")
+                target = trainer.env if stage == "reset" else trainer
+                with patch.object(target, stage, side_effect=error), \
+                        patch.object(trainer.env, "close", wraps=trainer.env.close) as close_env, \
+                        patch.object(trainer.logger, "close", wraps=trainer.logger.close) as close_logger:
+                    with self.assertRaises(OSError) as raised:
+                        trainer.train()
+                    self.assertIs(raised.exception, error)
+                    close_env.assert_called_once_with()
+                    close_logger.assert_called_once_with()
 
     def test_population_training_random_resets_evaluation_and_rng_resume(self):
         from src.envs.config import load_config

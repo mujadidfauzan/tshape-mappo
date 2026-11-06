@@ -1,5 +1,6 @@
 """PPO likelihood, gradient and checkpoint checks for the Easy learner."""
 
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -84,6 +85,21 @@ class MAPPOTests(unittest.TestCase):
         self.agent.critic.forward = fail
         actions, _, _ = self.agent.act(np.zeros((4, 3)), deterministic=True)
         self.assertEqual(actions.shape, (4, 2))
+
+    def test_single_transition_updates_actor_without_entropy_bonus(self):
+        from src.algorithms.rollout_buffer import RolloutBuffer
+        self.agent.config = replace(self.config, rollout_steps=1, ppo_epochs=1, entropy_coef=0.)
+        observations = np.ones((4, 3), dtype=np.float32)
+        state = np.zeros(5, dtype=np.float32)
+        _, latent, log_probs = self.agent.act(observations)
+        buffer = RolloutBuffer(1, 4, 3, 5)
+        buffer.add(observations, state, latent, log_probs, 5.,
+                   float(self.agent.value(state)), 0., True, False)
+        before = [p.detach().clone() for p in self.agent.actor.mean.parameters()]
+        metrics = self.agent.update(buffer, np.random.default_rng(4))
+        self.assertGreater(metrics["actor_grad_norm"], 0.)
+        self.assertTrue(any(not torch.equal(a, b)
+                            for a, b in zip(before, self.agent.actor.mean.parameters())))
 
     def test_checkpoint_roundtrip_restores_actions_values_normalizers_and_optimizers(self):
         from src.algorithms.mappo import MAPPO

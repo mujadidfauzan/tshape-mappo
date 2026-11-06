@@ -46,7 +46,10 @@ class RolloutBuffer:
             self.terminated[selected], self.truncated[selected], gamma, gae_lambda,
         )
         # Normalize across team transitions, not across duplicated agent rows.
-        normalized = (advantages - advantages.mean()) / max(float(advantages.std()), 1e-8)
+        # A single transition must keep its reward-driven policy gradient.
+        normalized = advantages
+        if self.size > 1:
+            normalized = (advantages - advantages.mean()) / max(float(advantages.std()), 1e-8)
         return {"observations": self.observations[selected], "states": self.states[selected],
                 "pre_tanh": self.pre_tanh[selected], "old_log_probs": self.log_probs[selected],
                 "old_values": self.values[selected], "advantages": normalized,

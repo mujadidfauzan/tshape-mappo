@@ -144,10 +144,10 @@ class Trainer:
     def train(self):
         cfg = self.config
         names = self.env.possible_agents
-        observations,_ = self.env.reset(seed=cfg.seed if self._resume_environment_rng is None else None)
-        started, first_step = time.perf_counter(), self.steps
-        self.checkpoint("latest.pt")
         try:
+            observations,_ = self.env.reset(seed=cfg.seed if self._resume_environment_rng is None else None)
+            started, first_step = time.perf_counter(), self.steps
+            self.checkpoint("latest.pt")
             while self.steps < cfg.total_steps:
                 buffer = RolloutBuffer(min(cfg.rollout_steps,cfg.total_steps-self.steps),**self.agent.dimensions)
                 components = {}
