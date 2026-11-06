@@ -129,6 +129,64 @@ geometri pintu pada `initial_state`, dan `episode_metrics.obstacle_collision_eve
 secara terpisah dari kontak dinding luar. `completion_time_s` adalah waktu melintas.
 `scripts/demo.py` tetap controller referensi untuk Easy.
 
+### Medium sempit dan randomisasi awal
+
+[medium_narrow.yaml](configs/medium_narrow.yaml) memakai
+[arena_medium_narrow.xml](assets/mujoco/arena_medium_narrow.xml) dengan bukaan
+**0,70 m**, dibandingkan 0,90 m pada Medium awal. Palang maksimum objek 0,60 m
+memiliki clearance sekitar 0,05 m per sisi saat sejajar. Pose awal yaw 0 tidak muat
+di bukaan; objek perlu diatur orientasinya selama melintas. Pose akhir tetap bebas.
+Varian lama, reward, timestep, gaya aktuator, dan dimensi observasi dipertahankan.
+Training panjang masih diperlukan untuk menilai kemampuan koordinasi policy.
+
+Tiga opsi berikut independen dan bisa dikombinasikan di YAML atau CLI:
+
+| YAML | CLI untuk mengaktifkan | Default |
+| --- | --- | --- |
+| `randomize_agents` | `--randomize-agents` | `true` pada konfigurasi Medium |
+| `randomize_object_position` | `--randomize-object-position` | `false` |
+| `randomize_object_orientation` | `--randomize-object-orientation` | `false` |
+
+Setiap flag memiliki bentuk `--no-...` untuk mematikannya. Randomisasi posisi
+memakai `object_position_range: [0.4, 0.6]`, yaitu setengah rentang XY dalam meter
+di sekitar `object_pose`: pada konfigurasi bawaan, X di [-1,9, -1,1] dan Y di
+[-0,6, 0,6]. CLI-nya `--object-position-range 0.4 0.6`. Randomisasi yaw memakai
+`object_yaw_range: [-3.141592653589793, 3.141592653589793]`, batas sudut absolut
+dalam radian, melalui `--object-yaw-range MIN MAX`. Komponen objek yang tidak
+diacak tetap mengikuti `object_pose`.
+
+Ketika `randomize_agents: false` tetapi pose objek diacak, susunan agen tetap
+**relatif terhadap objek**, mengikuti translasi dan rotasinya. `agent_positions`
+eksplisit ditafsirkan sebagai koordinat dunia pada pose referensi `object_pose`.
+Tanpa randomisasi objek, perilaku posisi tetap lama tidak berubah. Ketika
+`randomize_agents: true`, agen diambil ulang di dekat footprint objek aktual.
+
+Sampling menolak layout yang keluar arena, overlap, sudah sukses, atau membuat
+objek Medium mulai melewati sisi masuk sekat. Setelah 100 percobaan gagal,
+reset mengeluarkan error yang menjelaskan penyebab terakhir. Seed yang sama
+mereproduksi urutan layout; reset tanpa seed meneruskan RNG, bukan mengulang layout.
+
+Contoh untuk delapan agen, semuanya memakai run directory baru:
+
+~~~bash
+# Hanya posisi agen acak; objek tetap.
+python scripts/train.py --env-config configs/medium_narrow.yaml --device auto --num-agents 8 --total-steps 1000000 --run-dir results/medium_narrow_n8_agents_s42
+
+# Posisi objek acak, yaw tetap; posisi agen juga diacak.
+python scripts/train.py --env-config configs/medium_narrow.yaml --device auto --num-agents 8 --randomize-object-position --no-randomize-object-orientation --total-steps 1000000 --run-dir results/medium_narrow_n8_xy_s42
+
+# Hanya yaw objek acak, dengan formasi agen tetap relatif terhadap objek.
+python scripts/train.py --env-config configs/medium_narrow.yaml --device auto --num-agents 8 --no-randomize-agents --randomize-object-orientation --total-steps 1000000 --run-dir results/medium_narrow_n8_yaw_s42
+
+# Posisi agen, posisi objek, dan yaw objek semuanya acak.
+python scripts/train.py --env-config configs/medium_narrow.yaml --device auto --num-agents 8 --randomize-agents --randomize-object-position --randomize-object-orientation --total-steps 1000000 --run-dir results/medium_narrow_n8_all_s42
+~~~
+
+Evaluasi dan resume otomatis memakai XML serta opsi randomisasi dari checkpoint.
+Checkpoint lama yang tidak memuat opsi baru tetap memakai posisi/yaw objek tetap
+dan bukaan tersimpannya. Mengganti YAML baru tidak mengubah arena checkpoint lama.
+CLI resume menolak override randomisasi agar distribusi eksperimen tidak berubah.
+
 ## Training dari awal
 
 ~~~bash
@@ -315,8 +373,10 @@ Loss kecil sendiri tidak menunjukkan bahwa transport berhasil.
 ~~~text
 assets/mujoco/arena.xml
 assets/mujoco/arena_medium.xml
+assets/mujoco/arena_medium_narrow.xml
 configs/environment.yaml
 configs/medium.yaml
+configs/medium_narrow.yaml
 configs/mappo.yaml
 scripts/demo.py
 scripts/train.py

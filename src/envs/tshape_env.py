@@ -10,7 +10,7 @@ from pettingzoo import ParallelEnv
 from .config import load_config
 from .observations import feature_sizes, build_observations, build_state
 from .physics import TShapePhysics, finite_array
-from .spawning import sample_agent_positions
+from .spawning import sample_agent_positions, sample_object_pose
 from .rewards import team_reward, wrapped_yaw_error
 from .termination import goal_is_settled, object_inside_goal
 
@@ -65,23 +65,65 @@ class TShapeParallelEnv(ParallelEnv):
     def _restore_layout(self):
         cfg, physics = self.config, self.physics
         physics.reset(cfg.object_pose)
-        if cfg.randomize_agents:
-            positions = sample_agent_positions(physics, self.np_random, cfg.spawn_gap_min, cfg.spawn_gap_max)
-        elif cfg.agent_positions is not None:
-            positions = cfg.agent_positions
-        elif cfg.num_agents == 4:
-            positions = physics.model.body_pos[physics.agent_bodies, :2]
-        else:
-            positions = sample_agent_positions(physics, np.random.default_rng(0), cfg.spawn_gap_min, cfg.spawn_gap_max)
+        if cfg.randomize_object_position or cfg.randomize_object_orientation:
+            self._randomized_object_layout()
+            return
+        positions = self._agent_positions()
         physics.reset(cfg.object_pose, positions)
-        if self.doorway and np.max(physics.object_corners()[:, 0]) >= self.doorway.x_min:
+        self._validate_layout()
+
+    def _agent_positions(self):
+        cfg, physics = self.config, self.physics
+        if cfg.randomize_agents:
+            return sample_agent_positions(physics, self.np_random, cfg.spawn_gap_min, cfg.spawn_gap_max)
+        if cfg.agent_positions is not None:
+            return np.asarray(cfg.agent_positions)
+        if cfg.num_agents == 4:
+            return physics.model.body_pos[physics.agent_bodies, :2].copy()
+        return sample_agent_positions(physics, np.random.default_rng(0), cfg.spawn_gap_min, cfg.spawn_gap_max)
+
+    def _randomized_object_layout(self):
+        cfg, physics = self.config, self.physics
+        # Without agent randomization, preserve the reference formation in the
+        # object's frame, including explicitly supplied reference-world positions.
+        reference = None if cfg.randomize_agents else self._agent_positions()
+        last_error = None
+        for _ in range(100):
+            pose = sample_object_pose(cfg, self.np_random)
+            physics.reset(pose)
+            try:
+                self._validate_object_pose()
+                if reference is None:
+                    positions = self._agent_positions()
+                else:
+                    yaw = pose[2] - cfg.object_pose[2]
+                    rotation = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
+                    positions = (reference - np.asarray(cfg.object_pose[:2])) @ rotation.T + pose[:2]
+                physics.reset(pose, positions)
+                self._validate_layout()
+            except ValueError as error:
+                last_error = error
+                continue
+            return
+        raise ValueError(f"cannot sample a valid initial layout after 100 attempts: {last_error}; "
+                         "adjust object ranges or agent formation") from last_error
+
+    def _validate_object_pose(self):
+        physics = self.physics
+        corners = physics.object_corners()
+        if np.any(corners < physics.lower - 1e-9) or np.any(corners > physics.upper + 1e-9):
+            raise ValueError("initial object must fit inside the arena")
+        if self.doorway and np.max(corners[:, 0]) >= self.doorway.x_min:
             raise ValueError("Medium object must start entirely on the entrance side")
+        if self.object_inside_goal():
+            raise ValueError("the initial object must start outside the target")
+
+    def _validate_layout(self):
+        self._validate_object_pose()
         if self.physics.boundary_penetration() > 1e-9:
             raise ValueError("initial bodies must fit inside the arena")
         if any(c.dist < -1e-9 for c in self.physics.data.contact[:self.physics.data.ncon]):
             raise ValueError("initial bodies must not overlap")
-        if self.object_inside_goal():
-            raise ValueError("the fixed initial object must start outside the target")
 
     def observation_space(self, agent):
         return self._observation_spaces[agent]

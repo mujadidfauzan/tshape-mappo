@@ -3,6 +3,17 @@
 import numpy as np
 
 
+def sample_object_pose(config, rng):
+    """Sample enabled components only; disabled components keep their base pose."""
+    pose = np.array(config.object_pose, dtype=float)
+    if config.randomize_object_position:
+        extent = np.asarray(config.object_position_range)
+        pose[:2] += rng.uniform(-extent, extent)
+    if config.randomize_object_orientation:
+        pose[2] = rng.uniform(*config.object_yaw_range)
+    return pose
+
+
 def sample_agent_positions(physics, rng, gap_min, gap_max):
     corners = physics.object_corners()
     positions = []

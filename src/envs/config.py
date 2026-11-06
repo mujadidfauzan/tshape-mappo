@@ -41,20 +41,26 @@ class EnvironmentConfig:
     max_angular_speed: float = 10.0
     task: str = "easy"
     crossing_margin: float = .05
+    randomize_object_position: bool = False
+    randomize_object_orientation: bool = False
+    object_position_range: tuple = (.4, .6)
+    object_yaw_range: tuple = (-np.pi, np.pi)
 
     def __post_init__(self):
         if self.task not in ("easy", "medium"):
             raise ValueError("task must be easy or medium")
         if isinstance(self.num_agents, bool) or not isinstance(self.num_agents, int) or not 1 <= self.num_agents <= 16:
             raise ValueError("num_agents must be an integer from 1 to 16")
-        if not isinstance(self.randomize_agents, bool):
-            raise ValueError("randomize_agents must be boolean")
+        for name in ("randomize_agents", "randomize_object_position", "randomize_object_orientation"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be boolean")
         for name in ("frame_skip", "max_steps", "success_hold_steps"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         for name, shape in (("object_pose", (3,)), ("agent_positions", (self.num_agents, 2)),
-                            ("goal_center", (2,)), ("goal_half_size", (2,))):
+                            ("goal_center", (2,)), ("goal_half_size", (2,)),
+                            ("object_position_range", (2,)), ("object_yaw_range", (2,))):
             if name == "agent_positions" and self.agent_positions is None:
                 continue
             array = np.asarray(getattr(self, name), dtype=float)
@@ -64,6 +70,12 @@ class EnvironmentConfig:
             object.__setattr__(self, name, value)
         if min(self.goal_half_size) <= 0:
             raise ValueError("goal_half_size must be positive")
+        if min(self.object_position_range) < 0:
+            raise ValueError("object_position_range half-widths cannot be negative")
+        if self.randomize_object_position and max(self.object_position_range) <= 0:
+            raise ValueError("randomized object position needs a nonzero position range")
+        if self.object_yaw_range[0] >= self.object_yaw_range[1]:
+            raise ValueError("object_yaw_range must have increasing min/max angles in radians")
         nonnegative = ("success_linear_speed", "success_angular_speed", "distance_weight",
                        "orientation_weight", "progress_weight", "success_reward", "failure_penalty",
                        "distance_scale", "orientation_distance_scale", "max_penetration",
