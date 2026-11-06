@@ -1,4 +1,4 @@
-"""Four-component team reward for the Easy task."""
+"""Easy team reward and positive tanh distance reward for Medium."""
 
 import math
 
@@ -17,8 +17,11 @@ def team_reward(previous_distance, distance, yaw, success, failed, config):
             raise ValueError("reward inputs must be finite for stable physics")
         error = abs(wrapped_yaw_error(yaw, config.goal_yaw)) / math.pi
         parts.update(
-            distance=-config.distance_weight * distance / (distance + config.distance_scale),
-            orientation=-config.orientation_weight * math.exp(-distance / config.orientation_distance_scale) * error,
+            distance=(config.distance_weight * (1 - math.tanh(distance / config.distance_scale))
+                      if config.task == "medium" else
+                      -config.distance_weight * distance / (distance + config.distance_scale)),
+            orientation=(0.0 if config.task == "medium" else
+                         -config.orientation_weight * math.exp(-distance / config.orientation_distance_scale) * error),
             progress=config.progress_weight * (previous_distance - distance),
             success=config.success_reward if success else 0.0,
         )

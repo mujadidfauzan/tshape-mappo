@@ -1,4 +1,4 @@
-"""Train MAPPO on Easy with a fixed agent count per run; keep best and latest."""
+"""Train MAPPO on Easy/Medium; keep the best and latest checkpoints."""
 
 from dataclasses import replace
 import hashlib
@@ -41,14 +41,16 @@ class Trainer:
                 raise ValueError("resume uses the task saved in the checkpoint")
             self.agent, payload = MAPPO.from_checkpoint(resume,device=cfg.device,load_optimizers=True)
             saved = payload["training"]
-            if saved.get("task") not in ("fixed_easy_v1", "easy_v2"):
-                raise ValueError("resume requires an Easy checkpoint")
+            if saved.get("task") not in ("fixed_easy_v1", "easy_v2", "medium_v1"):
+                raise ValueError("resume requires an Easy or Medium checkpoint")
             previous = load_mappo_config(payload["mappo_config"])
             allowed = {"device","total_steps","eval_interval_steps","checkpoint_interval_steps",
                        "video_interval_steps","tensorboard","reward_log_interval_steps","eval_episodes"}
             if any(getattr(previous,k) != v for k,v in cfg.to_dict().items() if k not in allowed):
                 raise ValueError("resume restores network and optimizer settings from the checkpoint")
             base = load_config(saved["environment_config"])
+            if (saved["task"] == "medium_v1") != (base.task == "medium"):
+                raise ValueError("checkpoint task does not match its environment configuration")
             xml = saved["model_xml"]
             self.steps, self.updates = saved["environment_steps"], saved["updates"]
             self.completed_episodes = saved["completed_episodes"]
@@ -90,7 +92,7 @@ class Trainer:
         (self.run_dir/"mappo.yaml").write_text(yaml.safe_dump(cfg.to_dict()))
         self.logger = RunLogger(self.run_dir,cfg.tensorboard,cfg.reward_log_interval_steps)
         write_json(self.run_dir/"manifest.json",dict(
-            task="easy_v2",environment=self.environment_config.to_dict(),mappo=cfg.to_dict(),
+            task=self.environment_config.task_id,environment=self.environment_config.to_dict(),mappo=cfg.to_dict(),
             model_sha256=self.model_hash,actual_device=str(self.agent.device),
             resume_source=str(Path(resume).resolve()) if resume else None,
             previous_run_best_score=saved["best_score"] if saved else None,
@@ -113,7 +115,7 @@ class Trainer:
 
     def checkpoint(self, name):
         self.agent.save_checkpoint(self.run_dir/"checkpoints"/name,dict(
-            task="easy_v2",environment_steps=self.steps,updates=self.updates,
+            task=self.environment_config.task_id,environment_steps=self.steps,updates=self.updates,
             completed_episodes=self.completed_episodes,
             best_score=list(self.best_score) if self.best_score[0] >= 0 else None,
             environment_config=self.environment_config.to_dict(),model_xml=self.model_xml,

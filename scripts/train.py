@@ -1,4 +1,4 @@
-"""Start or resume Easy MAPPO with configurable agent count and seeded spawns."""
+"""Start or resume Easy/Medium MAPPO with configurable agents and seeded spawns."""
 
 import argparse
 import os
@@ -13,7 +13,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir",type=Path,required=True,help="new output directory")
     parser.add_argument("--config",type=Path,help="MAPPO YAML")
-    parser.add_argument("--env-config",type=Path,help="Easy YAML")
+    parser.add_argument("--env-config",type=Path,help="environment YAML (Easy default, or configs/medium.yaml)")
     parser.add_argument("--num-agents",type=int,choices=range(1,17),metavar="1..16",
                         help="agent count, fixed for this run; default from environment YAML (4)")
     parser.add_argument("--randomize-agents",action=argparse.BooleanOptionalAction,default=None,
@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--eval-episodes",type=int,help="seeded monitoring layouts per evaluation (default 10)")
     parser.add_argument("--video-interval-steps",type=int)
     parser.add_argument("--tensorboard",action=argparse.BooleanOptionalAction,default=None)
-    parser.add_argument("--resume",type=Path,help="Easy checkpoint; restores agent count and spawn settings")
+    parser.add_argument("--resume",type=Path,help="checkpoint; restores task, agent count and spawn settings")
     args=parser.parse_args()
     if sys.platform.startswith("linux"):
         os.environ.setdefault("MUJOCO_GL","egl")
@@ -55,7 +55,7 @@ def main():
         env_config = load_config(args.env_config,num_agents=args.num_agents,randomize_agents=args.randomize_agents)
     from src.training.trainer import Trainer
     trainer=Trainer(args.run_dir,cfg,env_config,resume=args.resume)
-    print(f"Easy: {trainer.run_dir}; device={trainer.agent.device}; "
+    print(f"{trainer.environment_config.task.capitalize()}: {trainer.run_dir}; device={trainer.agent.device}; "
           f"agents={trainer.environment_config.num_agents}; "
           f"randomize_agents={trainer.environment_config.randomize_agents}",flush=True)
     trainer.train()

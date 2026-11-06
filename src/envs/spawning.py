@@ -22,6 +22,10 @@ def sample_agent_positions(physics, rng, gap_min, gap_max):
             gap = min(distances) - radius
             if not gap_min <= gap <= gap_max:
                 continue
+            if any(np.linalg.norm(np.maximum(
+                    np.abs(point - physics.model.geom_pos[g, :2]) - physics.model.geom_size[g, :2], 0.))
+                   < radius + .01 for g in physics.obstacles):
+                continue
             if positions and np.any(np.linalg.norm(np.asarray(positions) - point, axis=1)
                                     < physics.radii[:i] + radius + .01):
                 continue

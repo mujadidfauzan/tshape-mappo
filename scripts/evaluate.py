@@ -1,4 +1,4 @@
-"""Evaluate an Easy checkpoint with its saved agent count and spawn settings."""
+"""Evaluate an Easy/Medium checkpoint with its saved geometry, agents and spawns."""
 
 import argparse
 import os
@@ -22,7 +22,7 @@ def main():
     args=parser.parse_args()
     if not args.render and sys.platform.startswith("linux"):
         os.environ.setdefault("MUJOCO_GL","egl")
-    print(f"Loading Easy policy: {args.checkpoint}",flush=True)
+    print(f"Loading transport policy: {args.checkpoint}",flush=True)
     import torch
     torch.set_num_threads(1)
     from src.evaluation.checkpoints import loaded_policy

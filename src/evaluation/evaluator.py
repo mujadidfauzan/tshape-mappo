@@ -1,4 +1,4 @@
-"""Evaluate seeded Easy layouts without learning or changing the training RNG."""
+"""Evaluate seeded transport layouts without learning or changing training RNG."""
 
 from contextlib import ExitStack
 from pathlib import Path

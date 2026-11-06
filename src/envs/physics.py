@@ -1,4 +1,4 @@
-"""Planar MuJoCo mechanics for the Easy arena."""
+"""Planar MuJoCo mechanics for Easy and the single-doorway Medium arena."""
 
 from pathlib import Path
 import re
@@ -7,6 +7,7 @@ import mujoco
 import numpy as np
 
 from .model import build_model_xml
+from .doorway import Doorway
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "assets" / "mujoco" / "arena.xml"
@@ -20,7 +21,7 @@ def finite_array(value, shape, name):
 
 
 class TShapePhysics:
-    def __init__(self, frame_skip=50, model_path=MODEL_PATH, num_agents=None):
+    def __init__(self, frame_skip=50, model_path=MODEL_PATH, num_agents=None, task="easy"):
         if isinstance(frame_skip, bool) or not isinstance(frame_skip, (int, np.integer)) or frame_skip < 1:
             raise ValueError("frame_skip must be a positive integer")
         self.model_path = Path(model_path).resolve()
@@ -70,12 +71,15 @@ class TShapePhysics:
         self.moving_geoms = np.array(sorted(self._moving_geom_set))
         self.radii = m.geom_size[self.agent_geom_ids, 0].copy()
         self.walls = {m.geom(f"wall_{side}").id for side in ("left", "right", "bottom", "top")}
-        if any(m.geom(i).name.startswith("obstacle_") for i in range(m.ngeom)):
+        self.obstacles = {i for i in range(m.ngeom) if m.geom(i).name.startswith("obstacle_")}
+        if self.obstacles and task != "medium":
             raise ValueError("The Easy baseline has no internal obstacles")
         self.lower = np.array([m.geom("wall_left").pos[0] + m.geom("wall_left").size[0],
                                m.geom("wall_bottom").pos[1] + m.geom("wall_bottom").size[1]])
         self.upper = np.array([m.geom("wall_right").pos[0] - m.geom("wall_right").size[0],
                                m.geom("wall_top").pos[1] - m.geom("wall_top").size[1]])
+        self.doorway = Doorway.from_physics(self) if task == "medium" else None
+        self._previous_obstacle_pairs = set()
         self.reset()
 
     @property
@@ -96,6 +100,7 @@ class TShapePhysics:
         if agent_positions is not None:
             d.qpos[self.agent_qpos] = agent_positions - m.body_pos[self.agent_bodies, :2]
         self._previous_wall_pairs = set()
+        self._previous_obstacle_pairs = set()
         mujoco.mj_forward(m, d)
 
     def rotation(self):
@@ -152,7 +157,7 @@ class TShapePhysics:
             if pair & self.object_geoms:
                 for agent, geom in enumerate(self.agent_geom_ids):
                     flags[agent] |= int(geom) in pair
-            if pair & self.walls and pair & self._moving_geom_set:
+            if pair & (self.walls | self.obstacles) and pair & self._moving_geom_set:
                 wall_pairs.add(tuple(sorted(pair)))
         return flags, wall_pairs, penetration
 
@@ -224,6 +229,7 @@ class TShapePhysics:
                   "object_path_length_m": 0.0, "control_effort_N2_s": 0.0,
                   "wall_collision_events": 0, "wall_contact_physics_steps": 0,
                   "max_penetration_m": 0.0, "failure_details": None}
+        report["obstacle_collision_events"] = 0
         report["agent_object_contact_time_s"] = np.zeros(self.num_agents)
         check = self.diagnostics(**safety_limits)
         if not check["stable"]:
@@ -250,8 +256,12 @@ class TShapePhysics:
             report["object_path_length_m"] += float(np.linalg.norm(position - previous_position))
             previous_position = position
             flags, pairs, _ = self.contact_state()
+            obstacle_pairs = {pair for pair in pairs if set(pair) & self.obstacles}
+            report["obstacle_collision_events"] += len(obstacle_pairs - self._previous_obstacle_pairs)
+            self._previous_obstacle_pairs = obstacle_pairs
             report["agent_object_contact_time_s"] += flags * self.model.opt.timestep
-            report["wall_collision_events"] += len(pairs - self._previous_wall_pairs)
-            report["wall_contact_physics_steps"] += int(bool(pairs))
-            self._previous_wall_pairs = pairs
+            wall_pairs = {pair for pair in pairs if set(pair) & self.walls}
+            report["wall_collision_events"] += len(wall_pairs - self._previous_wall_pairs)
+            report["wall_contact_physics_steps"] += int(bool(wall_pairs))
+            self._previous_wall_pairs = wall_pairs
         return report

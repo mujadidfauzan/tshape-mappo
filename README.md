@@ -1,15 +1,16 @@
-# T-Shape MAPPO — Easy
+# T-Shape MAPPO — Easy dan Medium
 
 Baseline kecil untuk belajar cooperative transport dengan MuJoCo dan shared-policy MAPPO.
 Proyek saat ini menjalankan **arena Easy, dengan 1–16 agen dan posisi awal agen
 yang diacak dekat objek**. Default empat agen. Posisi/yaw objek dan target tetap
 sama pada setiap episode.
 
-Tidak ada curriculum atau arena penghalang. Setiap jumlah agen dilatih sebagai
+Arena Easy tidak memiliki penghalang; Medium memakai satu pintu pada sekat arena.
+Tidak ada curriculum otomatis. Setiap jumlah agen dilatih sebagai
 policy tersendiri. Checkpoint baseline Fixed Easy sebelumnya tetap dapat dievaluasi
 dengan susunan empat agen tetap yang tersimpan di dalamnya.
 
-## Skenario
+## Skenario Easy (default)
 
 | Komponen | Konfigurasi awal |
 | --- | --- |
@@ -70,6 +71,63 @@ Demo menggunakan controller referensi untuk layout bawaan. Controller ini membac
 geometri secara langsung, tidak dipakai trainer, dan bukan policy yang dipelajari.
 Gunanya memastikan bahwa kontak fisik dapat membawa seluruh objek ke target.
 Demo selalu memakai susunan empat agen tetap lama; bukan uji policy pada spawn acak.
+
+## Medium: satu pintu
+
+Gunakan [medium.yaml](configs/medium.yaml) dan [arena_medium.xml](assets/mujoco/arena_medium.xml).
+Sekat berada pada X = 0, tebal 0,15 m, dengan satu bukaan selebar 0,90 m di Y = 0.
+Kedua ujung sekat menyambung ke dinding arena sehingga tidak ada jalur memutar.
+Objek mulai pada (-1,5, 0), yaw 0; empat agen default diacak di dekat objek.
+Objek memanjang 1,2 m dan memiliki palang maksimum 0,6 m: ia perlu berputar
+untuk lewat. Pada yaw pi/2, palang memiliki clearance 0,15 m per sisi bukaan.
+Geometri, bukan controller tersembunyi, menentukan apakah objek muat.
+
+Sukses terjadi ketika **seluruh sudut geometri objek** sudah berada di kanan
+permukaan keluar sekat ditambah margin 0,05 m (minimum X objek >= 0,125 m).
+Pose akhir, kecepatan rendah, dan containment pada kotak target tidak disyaratkan.
+Area hijau menunjukkan sisi tujuan. Sukses langsung mengakhiri episode sebagai
+termination, termasuk pada langkah terakhir; timeout tanpa sukses tetap truncation.
+Kegagalan fisika diprioritaskan jika terjadi pada langkah yang sama.
+
+Reward Medium adalah reward tim bersama:
+
+~~~text
+distance = 0.1 * (1 - tanh(d / 2.0))
+progress = 2 * (previous_d - d)
+success  = 20 pada keberhasilan menyeberang
+reward   = distance + progress + success
+~~~
+
+`d` adalah panjang lintasan titik pusat massa menuju referensi (1,5, 0), melalui
+bukaan. Perhitungan memakai lintasan lurus atau sudut bukaan tanpa pergantian fase
+diskontinu. Ini panduan reward untuk pusat objek, bukan jaminan clearance seluruh
+footprint atau perintah gerak. `distance_to_goal` di log Medium memakai jarak ini.
+Reward jarak positif, meningkat saat mendekat, dan dibatasi bobotnya; komponen
+progress tetap dapat negatif ketika menjauh. Tidak ada reward orientasi.
+Kegagalan fisika mengganti semua komponen normal dengan -20. Bonus sukses dan
+episode yang selesai saat menyeberang membatasi kesempatan mengumpulkan reward
+dengan diam dekat tujuan, tetapi keberhasilan belajar tetap perlu dievaluasi.
+
+Timestep 0,001 s, frame skip 50, gaya maksimum 3 N per sumbu per agen, arsitektur
+jaringan, dan hyperparameter MAPPO tetap sama dengan Easy. Actor dan critic
+Medium mendapat lima fitur tambahan: posisi pusat pintu (relatif untuk actor),
+ketebalan sekat, lebar bukaan, dan posisi bidang sukses sepanjang X (relatif untuk
+actor). Dimensinya 23+4N dan 22+4N, atau 39 dan 38 untuk empat agen.
+Checkpoint Medium menggunakan task `medium_v1`; evaluasi/resume memulihkan task
+dan XML tersimpan. Checkpoint Easy tetap didukung, tetapi tidak dapat langsung
+dipakai sebagai policy Medium karena dimensi input berbeda.
+
+~~~bash
+python scripts/train.py --env-config configs/medium.yaml --device cuda --num-agents 4 --total-steps 1000000 --run-dir results/medium_n4_s42
+python scripts/evaluate.py results/medium_n4_s42/checkpoints/best.pt --device auto --episodes 20 --seed 2000000
+python scripts/evaluate.py results/medium_n4_s42/checkpoints/best.pt --device auto --render
+python scripts/train.py --resume results/medium_n4_s42/checkpoints/latest.pt --device cuda --total-steps 2000000 --run-dir results/medium_n4_s42_resume
+~~~
+
+Gunakan run directory baru. Log episode/evaluasi mencatat `crossing_clearance_m`,
+geometri pintu pada `initial_state`, dan `episode_metrics.obstacle_collision_events`
+secara terpisah dari kontak dinding luar. `completion_time_s` adalah waktu melintas.
+`scripts/demo.py` tetap controller referensi untuk Easy.
 
 ## Training dari awal
 
@@ -256,17 +314,19 @@ Loss kecil sendiri tidak menunjukkan bahwa transport berhasil.
 
 ~~~text
 assets/mujoco/arena.xml
+assets/mujoco/arena_medium.xml
 configs/environment.yaml
+configs/medium.yaml
 configs/mappo.yaml
 scripts/demo.py
 scripts/train.py
 scripts/evaluate.py
-src/envs/          # Fisika, model sesuai jumlah agen, spawn dan Parallel API Easy
+src/envs/          # Fisika, pintu Medium, model, spawn dan Parallel API
 src/agents/        # Shared actor dan centralized critic
 src/algorithms/    # MAPPO, GAE, buffer dan normalisasi
 src/training/      # Trainer, konfigurasi dan logging
 src/evaluation/    # Evaluasi, checkpoint dan video
-tests/             # Lima modul pengujian Easy/MAPPO
+tests/             # Pengujian Easy/Medium dan MAPPO
 ~~~
 
 ## Verifikasi

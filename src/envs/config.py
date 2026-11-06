@@ -1,4 +1,4 @@
-"""Easy task settings: fixed object/target, configurable agent count and spawns."""
+"""Easy/Medium task settings with configurable agent counts and seeded spawns."""
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
@@ -39,8 +39,12 @@ class EnvironmentConfig:
     max_penetration: float = .005
     max_linear_speed: float = 5.0
     max_angular_speed: float = 10.0
+    task: str = "easy"
+    crossing_margin: float = .05
 
     def __post_init__(self):
+        if self.task not in ("easy", "medium"):
+            raise ValueError("task must be easy or medium")
         if isinstance(self.num_agents, bool) or not isinstance(self.num_agents, int) or not 1 <= self.num_agents <= 16:
             raise ValueError("num_agents must be an integer from 1 to 16")
         if not isinstance(self.randomize_agents, bool):
@@ -63,7 +67,8 @@ class EnvironmentConfig:
         nonnegative = ("success_linear_speed", "success_angular_speed", "distance_weight",
                        "orientation_weight", "progress_weight", "success_reward", "failure_penalty",
                        "distance_scale", "orientation_distance_scale", "max_penetration",
-                       "max_linear_speed", "max_angular_speed", "spawn_gap_min", "spawn_gap_max")
+                       "max_linear_speed", "max_angular_speed", "spawn_gap_min", "spawn_gap_max",
+                       "crossing_margin")
         for name in (*nonnegative, "goal_yaw"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value):
@@ -79,6 +84,10 @@ class EnvironmentConfig:
                 raise ValueError(f"{name} must be positive")
         if not isinstance(self.model_path, str) or not self.model_path:
             raise ValueError("model_path must be a nonempty string")
+
+    @property
+    def task_id(self):
+        return "medium_v1" if self.task == "medium" else "easy_v2"
 
     @property
     def resolved_model_path(self):
@@ -99,6 +108,6 @@ def load_config(config=None, **overrides):
             raise ValueError("environment configuration must be a mapping")
         unknown = set(values) - {f.name for f in fields(EnvironmentConfig)}
         if unknown:
-            raise ValueError(f"unsupported Easy settings: {sorted(unknown)}")
+            raise ValueError(f"unsupported environment settings: {sorted(unknown)}")
         result = EnvironmentConfig(**values)
     return replace(result, **{k: v for k, v in overrides.items() if v is not None})

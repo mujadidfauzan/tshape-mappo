@@ -1,4 +1,4 @@
-"""Easy Parallel environment with a fixed object/goal and configurable agents."""
+"""Parallel cooperative transport: Easy containment or Medium doorway crossing."""
 
 from contextlib import nullcontext
 from copy import deepcopy
@@ -23,7 +23,11 @@ class TShapeParallelEnv(ParallelEnv):
         if render_mode not in (None, "human"):
             raise ValueError("render_mode must be None or human")
         self.config = cfg = load_config(config)
-        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path, cfg.num_agents)
+        self.physics = TShapePhysics(cfg.frame_skip, cfg.resolved_model_path, cfg.num_agents, task=cfg.task)
+        self.doorway = self.physics.doorway
+        if self.doorway and (cfg.goal_center[0] <= self.doorway.x_max + cfg.crossing_margin
+                             or not self.doorway.y_min <= cfg.goal_center[1] <= self.doorway.y_max):
+            raise ValueError("Medium goal reference must lie beyond and align with the doorway")
         self.np_random = np.random.default_rng(0)
         self.goal_center = np.asarray(cfg.goal_center)
         self.goal_half_size = np.asarray(cfg.goal_half_size)
@@ -35,8 +39,9 @@ class TShapeParallelEnv(ParallelEnv):
         self.max_steps = cfg.max_steps
         self.render_mode = render_mode
         self.viewer = None
-        self.metadata = {**type(self).metadata, "render_fps": round(1/self.physics.control_dt)}
-        observation_size, state_size = feature_sizes(cfg.num_agents)
+        self.metadata = {**type(self).metadata, "name": f"tshape_{cfg.task_id}",
+                         "render_fps": round(1/self.physics.control_dt)}
+        observation_size, state_size = feature_sizes(cfg.num_agents, doorway=self.doorway is not None)
         self.policy_dimensions = dict(observation_size=observation_size, state_size=state_size,
                                       action_size=2, num_agents=cfg.num_agents)
         self.state_space = spaces.Box(-np.inf, np.inf, (state_size,), np.float32)
@@ -49,6 +54,12 @@ class TShapeParallelEnv(ParallelEnv):
         marker = self.physics.model.site("goal")
         marker.pos[:] = [*self.goal_center, .004]
         marker.size[:] = [*self.goal_half_size, .003]
+        if self.doorway:
+            exit_x = self.doorway.x_max + cfg.crossing_margin
+            marker.pos[:2] = [(exit_x + self.physics.upper[0]) / 2,
+                              (self.physics.lower[1] + self.physics.upper[1]) / 2]
+            marker.size[:2] = [(self.physics.upper[0] - exit_x) / 2,
+                               (self.physics.upper[1] - self.physics.lower[1]) / 2]
         self._restore_layout()
 
     def _restore_layout(self):
@@ -63,6 +74,8 @@ class TShapeParallelEnv(ParallelEnv):
         else:
             positions = sample_agent_positions(physics, np.random.default_rng(0), cfg.spawn_gap_min, cfg.spawn_gap_max)
         physics.reset(cfg.object_pose, positions)
+        if self.doorway and np.max(physics.object_corners()[:, 0]) >= self.doorway.x_min:
+            raise ValueError("Medium object must start entirely on the entrance side")
         if self.physics.boundary_penetration() > 1e-9:
             raise ValueError("initial bodies must fit inside the arena")
         if any(c.dist < -1e-9 for c in self.physics.data.contact[:self.physics.data.ncon]):
@@ -87,17 +100,23 @@ class TShapeParallelEnv(ParallelEnv):
     def _observations(self):
         if self._failed:
             return {n: a.copy() for n, a in self._last_observations.items()}
-        return build_observations(self.physics, self.goal_center, self.goal_half_size, *self._fractions())
+        return build_observations(self.physics, self.goal_center, self.goal_half_size, *self._fractions(),
+                                  crossing_margin=self.config.crossing_margin)
 
     def state(self):
         if self._failed:
             return self._last_state.copy()
-        return build_state(self.physics, self.goal_center, self.goal_half_size, *self._fractions())
+        return build_state(self.physics, self.goal_center, self.goal_half_size, *self._fractions(),
+                           crossing_margin=self.config.crossing_margin)
 
     def _distance(self):
+        if self.doorway:
+            return self.doorway.route_distance(self.physics.get_object_state()["position"], self.goal_center)
         return float(np.linalg.norm(self.physics.get_object_state()["position"] - self.goal_center))
 
     def object_inside_goal(self):
+        if self.doorway:
+            return self.doorway.crossed(self.physics.object_corners(), self.config.crossing_margin)
         return object_inside_goal(self.physics.object_corners(), self.goal_center, self.goal_half_size)
 
     def reset(self, seed=None, options=None):
@@ -118,10 +137,16 @@ class TShapeParallelEnv(ParallelEnv):
             self._metrics = dict(episode_return=0., object_path_length_m=0., control_effort_N2_s=0.,
                                  wall_collision_events=0, max_penetration_m=0., inside_goal_steps=0,
                                  agent_object_contact_time_s=[0.]*self.config.num_agents)
+            if self.doorway:
+                self._metrics["obstacle_collision_events"] = 0
             obj = self.physics.get_object_state()
             self._initial_state = dict(object_position=obj["position"].tolist(), object_yaw=obj["yaw"],
                                        agent_positions=self.physics.get_agents_state()[0].tolist(),
                                        goal_center=self.goal_center.tolist(), goal_yaw=self.config.goal_yaw)
+            if self.doorway:
+                self._initial_state["doorway"] = dict(x_min=self.doorway.x_min, x_max=self.doorway.x_max,
+                                                     y_min=self.doorway.y_min, y_max=self.doorway.y_max,
+                                                     crossing_margin=self.config.crossing_margin)
             obs = self._observations()
             self._last_observations = {n: a.copy() for n, a in obs.items()}
             self._last_state = self.state()
@@ -132,7 +157,7 @@ class TShapeParallelEnv(ParallelEnv):
     def _info(self, success, components, reason, failure_reason):
         finite = self._finite()
         obj = self.physics.get_object_state() if finite else None
-        return dict(
+        info = dict(
             success=bool(success), stable=not self._failed, episode_step=self.steps,
             elapsed_time_s=float(self.physics.data.time) if np.isfinite(self.physics.data.time) else None,
             completion_time_s=self._completion_time_s if success else None,
@@ -143,6 +168,10 @@ class TShapeParallelEnv(ParallelEnv):
             initial_state=deepcopy(self._initial_state) if self.steps == 0 or reason else None,
             failure_details=deepcopy(self._failure_details),
         )
+        if self.doorway:
+            info["crossing_clearance_m"] = (self.doorway.clearance(self.physics.object_corners(),
+                                                                  self.config.crossing_margin) if finite else None)
+        return info
 
     def step(self, actions):
         if not self._has_reset:
@@ -162,22 +191,24 @@ class TShapeParallelEnv(ParallelEnv):
             self.steps += 1
             self._failed = not report["stable"]
             self._failure_details = report["failure_details"]
-            settled = (not self._failed and goal_is_settled(
+            settled = (not self._failed and (self.object_inside_goal() if self.doorway else goal_is_settled(
                 self.physics, self.goal_center, self.goal_half_size,
-                cfg.success_linear_speed, cfg.success_angular_speed))
+                cfg.success_linear_speed, cfg.success_angular_speed)))
             self.goal_hold_count = self.goal_hold_count + 1 if settled else 0
             first_success = (not self._failed and self._completion_time_s is None
-                             and self.goal_hold_count >= cfg.success_hold_steps)
+                             and self.goal_hold_count >= (1 if self.doorway else cfg.success_hold_steps))
             if first_success:
                 self._completion_time_s = float(self.physics.data.time)
             success = not self._failed and self._completion_time_s is not None
-            # Reaching the goal does not end the episode. Only physics failure terminates.
-            terminated = self._failed
+            # Easy continues after success; Medium finishes on full-object crossing.
+            terminated = self._failed or (self.doorway is not None and success)
             truncated = self.steps >= self.max_steps and not terminated
             distance = self._distance() if self._finite() else previous
             yaw = self.physics.get_object_state()["yaw"] if not self._failed else 0.
             reward, parts = team_reward(previous, distance, yaw, first_success, self._failed, cfg)
             self._metrics["episode_return"] += reward
+            if self.doorway:
+                self._metrics["obstacle_collision_events"] += report["obstacle_collision_events"]
             for key in ("object_path_length_m", "control_effort_N2_s", "wall_collision_events"):
                 self._metrics[key] += report[key]
             self._metrics["max_penetration_m"] = max(self._metrics["max_penetration_m"], report["max_penetration_m"])
@@ -189,7 +220,8 @@ class TShapeParallelEnv(ParallelEnv):
             if not self._failed:
                 self._last_observations = {n: a.copy() for n, a in obs.items()}
                 self._last_state = self.state()
-            reason = "physics_failure" if self._failed else "time_limit" if truncated else None
+            reason = ("physics_failure" if self._failed else "success" if terminated
+                      else "time_limit" if truncated else None)
             info = self._info(success, parts, reason, report["failure_reason"])
             if terminated or truncated:
                 self.agents = []
